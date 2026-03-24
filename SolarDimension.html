@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self' 'unsafe-inline' 'unsafe-eval' https: data: blob:;" />
   <title>SolarDimension - Dimensionnement PV</title>
 
   <!-- Tailwind CSS -->
@@ -13,18 +15,18 @@
     integrity="sha512-GsLlZN/3F2ErC5ifS5QtgpiJtWd43JWSuIgh7mbzZ8zBps+dvLusV+eNQATqgA/HdeKFVgA5v3S/cIrLF7QnIg=="
     crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
-  <!-- React 18 UMD -->
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- React 18 UMD (jsDelivr — compatible GitHub Pages) -->
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/react-dom@18/umd/react-dom.production.min.js"></script>
 
   <!-- PropTypes (required by Recharts UMD) -->
-  <script crossorigin src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+  <script crossorigin src="https://cdn.jsdelivr.net/npm/prop-types@15.8.1/prop-types.min.js"></script>
 
   <!-- Recharts 2.x UMD (compatible React 18) -->
-  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/recharts@2.12.7/umd/Recharts.js"></script>
 
   <!-- Babel Standalone for JSX transform -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@babel/standalone/babel.min.js"></script>
 
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
@@ -32,14 +34,30 @@
     @media print {
       body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     }
+    /* Scrollbar custom pour le tableau de charges */
+    .loads-scroll::-webkit-scrollbar { height: 6px; }
+    .loads-scroll::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 3px; }
+    .loads-scroll::-webkit-scrollbar-thumb { background: #94a3b8; border-radius: 3px; }
+    .loads-scroll::-webkit-scrollbar-thumb:hover { background: #475569; }
+    /* Ombre de la colonne sticky */
+    .sticky-col { position: sticky; left: 0; z-index: 5; }
+    .sticky-col::after {
+      content: '';
+      position: absolute;
+      top: 0; right: -8px; bottom: 0;
+      width: 8px;
+      background: linear-gradient(to right, rgba(0,0,0,0.06), transparent);
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
   <div id="root"></div>
 
   <script type="text/babel">
-    const { useState, useEffect } = React;
-    const { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } = Recharts;
+    const { useState, useEffect, useRef } = React;
+    const { PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
+            BarChart, Bar, XAxis, YAxis, ReferenceLine, CartesianGrid } = Recharts;
 
     // =========================================================
     // CONSTANTS & DATA
@@ -57,6 +75,8 @@
       kFactor: 0.65,
       dischargeLimit: 0.80,
       inverterNominalKW: 0,  // 0 = calculé auto à partir des charges
+      ks: 0.80,             // facteur de simultanéité (0.7–1.0)
+      ke: 1.10,             // facteur d'extension / réserve future (1.0–1.3)
     };
 
     // =========================================================
@@ -164,21 +184,75 @@
     // =========================================================
     // CALCULATIONS
     // =========================================================
+    // Fenêtre de production PV (heures solaires)
+    const PV_START = 6, PV_END = 18;
+
+    // Renvoie true si ce load est actif à l'heure h
+    // Priorité : activeHours[] (matrice 24h) > startHour+hours (legacy)
+    function activeAtHour(load, h) {
+      if (load.activeHours) return !!load.activeHours[h];
+      // Fallback legacy (projets sauvegardés sans activeHours)
+      const start = Math.floor(load.startHour ?? 18) % 24;
+      const dur   = Math.min(Math.ceil(load.hours || 0), 24);
+      if (dur >= 24) return true;
+      const end = (start + dur) % 24;
+      return start < end ? (h >= start && h < end) : (h >= start || h < end);
+    }
+
     function calculateSolarSystem(loads, settings) {
-      let rawEnergyAC = 0;
-      let rawEnergyDC = 0;
+      let rawEnergyAC = 0, rawEnergyAC_day = 0, rawEnergyAC_night = 0;
+      let rawEnergyDC = 0, rawEnergyDC_day = 0, rawEnergyDC_night = 0;
       let maxPowerApparent = 0;
 
+      const ks = settings.ks ?? 1.0;
+      const ke = settings.ke ?? 1.0;
+
       loads.forEach(load => {
-        const energy = load.power * load.hours * load.quantity;
-        const totalPower = load.power * load.quantity;
+        const ku = load.ku ?? 1.0;
+
+        // Compter les heures actives via la matrice 24h (ou fallback legacy)
+        let activeHrsCount = 0, dayH = 0;
+        for (let h = 0; h < 24; h++) {
+          if (activeAtHour(load, h)) {
+            activeHrsCount++;
+            if (h >= PV_START && h < PV_END) dayH++;
+          }
+        }
+
+        const energy     = load.power * ku * activeHrsCount * load.quantity;
+        const totalPower = load.power * ku * load.quantity;
+        const dayFrac    = activeHrsCount > 0 ? dayH / activeHrsCount : 0;
+
         if (load.type === LoadType.AC) {
-          rawEnergyAC += energy;
-          maxPowerApparent += totalPower;
+          rawEnergyAC       += energy;
+          rawEnergyAC_day   += energy * dayFrac;
+          rawEnergyAC_night += energy * (1 - dayFrac);
+          maxPowerApparent  += totalPower;
         } else {
-          rawEnergyDC += energy;
+          rawEnergyDC       += energy;
+          rawEnergyDC_day   += energy * dayFrac;
+          rawEnergyDC_night += energy * (1 - dayFrac);
         }
       });
+
+      // Profil horaire 24h (puissance totale par heure)
+      const hourlyProfile = Array.from({ length: 24 }, (_, h) => {
+        const power = loads.reduce((sum, load) => {
+          if (!activeAtHour(load, h)) return sum;
+          return sum + load.power * (load.ku ?? 1.0) * load.quantity;
+        }, 0);
+        return { h, label: h < 10 ? `0${h}h` : `${h}h`, power: Math.round(power * ks * ke) };
+      });
+      const peakHour = hourlyProfile.reduce((max, p) => p.power > max.power ? p : max, { power: 0 });
+
+      // Facteurs globaux : Ks (simultanéité) × Ke (extension/réserve)
+      rawEnergyAC       *= ks * ke;
+      rawEnergyAC_day   *= ks * ke;
+      rawEnergyAC_night *= ks * ke;
+      rawEnergyDC       *= ks * ke;
+      rawEnergyDC_day   *= ks * ke;
+      rawEnergyDC_night *= ks * ke;
+      maxPowerApparent  *= ks * ke;
 
       const correctedEnergyAC = rawEnergyAC / settings.inverterEfficiency;
       const totalEnergyDaily = correctedEnergyAC + rawEnergyDC;
@@ -224,6 +298,11 @@
         batteriesParallel,
         regulatorAmps,
         inverterPower,
+        ksKe: ks * ke,
+        energyDay:   rawEnergyAC_day / settings.inverterEfficiency + rawEnergyDC_day,
+        energyNight: rawEnergyAC_night / settings.inverterEfficiency + rawEnergyDC_night,
+        hourlyProfile,
+        peakHour,
       };
     }
 
@@ -240,13 +319,27 @@
 
     // Table câbles solaires H1Z2Z2-K (ampacité en pose libre, 70°C)
     const DC_SOLAR_CABLE_TABLE = [
-      { section: 4,  ampacity: 38 },
-      { section: 6,  ampacity: 49 },
-      { section: 10, ampacity: 66 },
-      { section: 16, ampacity: 88 },
+      { section: 4,  ampacity: 38  },
+      { section: 6,  ampacity: 49  },
+      { section: 10, ampacity: 66  },
+      { section: 16, ampacity: 88  },
       { section: 25, ampacity: 117 },
       { section: 35, ampacity: 142 },
       { section: 50, ampacity: 170 },
+    ];
+    // U-1000 R2V Cu — pose en conduit (NFC 15-100, méthode B2, facteur 1.25 inclus)
+    const AC_CABLE_TABLE = [
+      { section: 1.5, ampacity: 14.5 },
+      { section: 2.5, ampacity: 19.5 },
+      { section: 4,   ampacity: 26   },
+      { section: 6,   ampacity: 34   },
+      { section: 10,  ampacity: 46   },
+      { section: 16,  ampacity: 61   },
+      { section: 25,  ampacity: 80   },
+      { section: 35,  ampacity: 99   },
+      { section: 50,  ampacity: 119  },
+      { section: 70,  ampacity: 151  },
+      { section: 95,  ampacity: 182  },
     ];
 
     function calculateStringConfig(s) {
@@ -588,6 +681,99 @@
     }
 
     // =========================================================
+    // CONSTANT: 12 étapes guide ELEKTRA IFS
+    // =========================================================
+    const STEPS_DEF = [
+      { n:  1, label: 'Facteurs\nKu/Ks/Ke',    tab: 'dimensionnement', anchor: 'etape-1',  status: 'done'    },
+      { n:  2, label: 'Bilan de\npuissance',    tab: 'dimensionnement', anchor: 'etape-2',  status: 'done'    },
+      { n:  3, label: 'Profil\nhoraire',        tab: 'dimensionnement', anchor: 'etape-3',  status: 'done'    },
+      { n:  4, label: 'Philosophie\nsystème',   tab: 'dimensionnement', anchor: null,        status: 'todo'    },
+      { n:  5, label: 'Générateur\nPV',         tab: 'dimensionnement', anchor: 'etape-5',  status: 'done'    },
+      { n:  6, label: 'Parc\nbatterie',         tab: 'dimensionnement', anchor: 'etape-6',  status: 'done'    },
+      { n:  7, label: 'Régulateur\nOnduleur',   tab: 'dimensionnement', anchor: 'etape-7',  status: 'done'    },
+      { n:  8, label: 'Strings &\nParallèles',  tab: 'strings',         anchor: 'etape-8',  status: 'done'    },
+      { n:  9, label: 'DC\nBox',                tab: 'strings',         anchor: 'etape-9',  status: 'done'    },
+      { n: 10, label: 'AC\nBox',                tab: 'strings',         anchor: 'etape-10', status: 'done'    },
+      { n: 11, label: 'Câblage\ncâbles',        tab: 'dimensionnement', anchor: 'etape-11', status: 'done'    },
+      { n: 12, label: 'Checklist\nvalidation',  tab: 'dimensionnement', anchor: null,        status: 'todo'    },
+    ];
+
+    // =========================================================
+    // COMPONENT: StepProgress
+    // =========================================================
+    function StepProgress({ activeTab, setActiveTab }) {
+      const handleStepClick = (step) => {
+        if (step.status === 'todo' || !step.anchor) return;
+        if (step.tab !== activeTab) {
+          setActiveTab(step.tab);
+          setTimeout(() => {
+            const el = document.getElementById(step.anchor);
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          }, 160);
+        } else {
+          const el = document.getElementById(step.anchor);
+          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      };
+
+      const styleMap = {
+        done:    { ring: 'bg-green-500 border-green-500 text-white',         line: 'bg-green-300',  lbl: 'text-green-700'  },
+        partial: { ring: 'bg-orange-400 border-orange-400 text-white',       line: 'bg-orange-200', lbl: 'text-orange-600' },
+        todo:    { ring: 'bg-white border-gray-300 text-gray-400',           line: 'bg-gray-200',   lbl: 'text-gray-400'   },
+      };
+
+      return (
+        <div className="bg-gray-50 border-b border-gray-200 print:hidden">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-bold text-gray-500 uppercase tracking-widest flex items-center gap-2">
+                <LayoutGrid className="w-3.5 h-3.5 text-orange-400" />
+                Guide ELEKTRA IFS — 12 Étapes
+              </span>
+              <div className="hidden sm:flex items-center gap-3 text-xs text-gray-500">
+                <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-green-500" />Implémenté</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-orange-400" />Partiel</span>
+                <span className="flex items-center gap-1"><span className="inline-block w-2 h-2 rounded-full bg-gray-300 border border-gray-300" />À venir</span>
+              </div>
+            </div>
+            <div className="overflow-x-auto pb-1">
+              <div className="flex items-start min-w-max">
+                {STEPS_DEF.map((step, idx) => {
+                  const s = styleMap[step.status];
+                  const clickable = step.status !== 'todo' && !!step.anchor;
+                  const isCurrent = step.anchor && activeTab === step.tab;
+                  return (
+                    <React.Fragment key={step.n}>
+                      <div
+                        className={`flex flex-col items-center ${clickable ? 'cursor-pointer group' : 'cursor-default opacity-60'}`}
+                        style={{ width: '64px' }}
+                        onClick={() => handleStepClick(step)}
+                        title={clickable ? `Naviguer → Étape ${step.n}` : `Étape ${step.n} — à implémenter`}
+                      >
+                        <div className={`w-9 h-9 rounded-full border-2 flex items-center justify-center text-sm font-bold transition-all duration-150 shadow-sm ${s.ring} ${clickable ? 'group-hover:scale-110 group-hover:shadow-md' : ''} ${isCurrent ? 'ring-2 ring-offset-1 ring-orange-400' : ''}`}>
+                          {step.status === 'done' ? '✓' : step.status === 'partial' ? '~' : step.n}
+                        </div>
+                        <div className="text-center mt-1 leading-tight" style={{ width: '62px' }}>
+                          <span className={`block text-[10px] font-bold ${s.lbl}`}>Ét. {step.n}</span>
+                          {step.label.split('\n').map((line, i) => (
+                            <span key={i} className={`block text-[9px] leading-none mt-0.5 ${s.lbl}`}>{line}</span>
+                          ))}
+                        </div>
+                      </div>
+                      {idx < STEPS_DEF.length - 1 && (
+                        <div className={`h-0.5 w-4 flex-shrink-0 self-start mt-[18px] ${s.line}`} />
+                      )}
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================
     // COMPONENT: LoadInput
     // =========================================================
     function LoadInput({ loads, setLoads }) {
@@ -597,8 +783,9 @@
           name: 'Nouvel Appareil',
           type: LoadType.AC,
           power: 0,
-          hours: 0,
           quantity: 1,
+          ku: 1.0,
+          activeHours: Array.from({ length: 24 }, (_, h) => h >= 18 && h < 22),
         };
         setLoads([...loads, newLoad]);
       };
@@ -613,97 +800,270 @@
         setLoads(loads.filter(load => load.id !== id));
       };
 
+      // Suivi du scroll pour l'indicateur
+      const tableRef = useRef(null);
+      const [scrollPct, setScrollPct] = useState(0);
+      const [isScrollable, setIsScrollable] = useState(false);
+
+      useEffect(() => {
+        const el = tableRef.current;
+        if (!el) return;
+        const update = () => {
+          const maxScroll = el.scrollWidth - el.clientWidth;
+          setIsScrollable(maxScroll > 4);
+          setScrollPct(maxScroll > 0 ? el.scrollLeft / maxScroll : 0);
+        };
+        update();
+        el.addEventListener('scroll', update);
+        window.addEventListener('resize', update);
+        return () => { el.removeEventListener('scroll', update); window.removeEventListener('resize', update); };
+      }, [loads]);
+
+      // Heures actives par appareil (matrice 24h ou legacy)
+      const activeHrsOf = (l) => {
+        if (l.activeHours) return l.activeHours.filter(Boolean).length;
+        return Math.min(l.hours || 0, 24);
+      };
+      // Toggle une heure dans la matrice
+      const toggleHour = (id, h, currentHours) => {
+        const arr = [...(currentHours ?? Array(24).fill(false))];
+        arr[h] = !arr[h];
+        updateLoad(id, 'activeHours', arr);
+      };
+      // Présets rapides
+      const presets = [
+        { label: '☀️ Jour',   fn: () => Array.from({length:24}, (_,h) => h>=6  && h<18) },
+        { label: '🌙 Nuit',   fn: () => Array.from({length:24}, (_,h) => h<6   || h>=18) },
+        { label: '🕕 Soirée', fn: () => Array.from({length:24}, (_,h) => h>=18 && h<22) },
+        { label: '24h',       fn: () => Array(24).fill(true)  },
+        { label: '⊘',         fn: () => Array(24).fill(false) },
+      ];
+      // Calcul Énergie par ligne (Wh/j)
+      const rowEnergy = (l) => Math.round(l.power * (l.ku ?? 1) * activeHrsOf(l) * l.quantity);
+      const totalQty  = loads.reduce((a, l) => a + l.quantity, 0);
+      const totalWh   = loads.reduce((a, l) => a + rowEnergy(l), 0);
+
       return (
-        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 print:shadow-none print:border-gray-300 print:break-inside-avoid">
-          <div className="flex justify-between items-center mb-4">
-            <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
-              <Zap className="w-5 h-5 text-yellow-500" />
-              1. Consommation (Besoins)
+        <div id="etape-2" className="bg-white rounded-xl shadow-sm border border-gray-100 print:shadow-none print:border-gray-300 print:break-inside-avoid">
+
+          {/* Barre titre */}
+          <div className="flex justify-between items-center px-5 py-4 border-b border-gray-100">
+            <h2 className="text-base font-semibold text-gray-800 flex items-center gap-2">
+              <Zap className="w-4 h-4 text-yellow-500" />
+              Bilan de Puissance
+              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200">Étape 2</span>
             </h2>
             <button
               onClick={addLoad}
-              className="flex items-center gap-1 text-sm bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition-colors print:hidden"
+              className="flex items-center gap-1.5 text-xs font-semibold bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition-colors print:hidden"
             >
-              <Plus className="w-4 h-4" /> Ajouter
+              <Plus className="w-3.5 h-3.5" /> Ajouter
             </button>
           </div>
 
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm text-left">
-              <thead className="text-xs text-gray-500 uppercase bg-gray-50 print:bg-gray-100">
-                <tr>
-                  <th className="px-4 py-3">Appareil</th>
-                  <th className="px-4 py-3 w-24">Type</th>
-                  <th className="px-4 py-3 w-24">Puissance (W)</th>
-                  <th className="px-4 py-3 w-24">Heures/j</th>
-                  <th className="px-4 py-3 w-20">Qté</th>
-                  <th className="px-4 py-3 w-10 print:hidden"></th>
+          {/* Indicateur de scroll */}
+          {isScrollable && (
+            <div className="px-5 pt-2 print:hidden">
+              <div className="flex items-center gap-2 text-[10px] text-gray-400 mb-1">
+                <span>←</span>
+                <div className="flex-1 h-1 bg-gray-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-blue-400 rounded-full transition-all duration-150"
+                    style={{ width: `${Math.max(8, scrollPct * 100)}%`, marginLeft: `${scrollPct > 0 ? Math.min(scrollPct * (100 - 20), 80) : 0}%` }}
+                  />
+                </div>
+                <span>→</span>
+                <span className="text-gray-300">Défilement horizontal</span>
+              </div>
+            </div>
+          )}
+
+          {/* Table */}
+          <div ref={tableRef} className="loads-scroll overflow-x-auto px-0">
+            <table className="w-full text-sm border-collapse" style={{ minWidth: '560px' }}>
+
+              {/* ── Ligne 1 : groupes ── */}
+              <thead>
+                <tr className="text-[10px] font-bold uppercase tracking-wider">
+                  <th className="sticky-col bg-gray-700 text-white px-3 py-1.5 text-left" style={{ minWidth: '130px' }}>
+                    Identification
+                  </th>
+                  <th colSpan={3} className="bg-blue-600 text-white px-3 py-1.5 text-center border-l border-blue-500">
+                    ⚡ Charge électrique
+                  </th>
+                  <th className="bg-amber-500 text-white px-3 py-1.5 text-center border-l border-amber-400 w-20"
+                      title="Ku = charge réelle / puissance nominale">Ku</th>
+                  <th className="bg-emerald-600 text-white px-3 py-1.5 text-right border-l border-emerald-500 w-24">Wh/j</th>
+                  <th className="bg-gray-600 px-2 py-1.5 w-8 print:hidden"></th>
+                </tr>
+                {/* ── Ligne 2 : colonnes ── */}
+                <tr className="text-xs bg-gray-50 border-b border-gray-200">
+                  <th className="sticky-col bg-gray-50 px-3 py-2 text-left font-semibold text-gray-600 border-r border-gray-200"
+                      style={{ minWidth: '130px' }}>Appareil</th>
+                  <th className="px-3 py-2 text-center text-blue-600 font-medium w-20">Type</th>
+                  <th className="px-3 py-2 text-right text-blue-600 font-medium w-20" title="Puissance nominale (W)">W</th>
+                  <th className="px-3 py-2 text-right text-blue-600 font-medium w-14" title="Nombre d'appareils">N</th>
+                  <th className="px-3 py-2 text-right text-amber-600 font-medium w-20 border-l border-amber-100"
+                      title="Facteur d'utilisation (0.10–1.00)">0–1</th>
+                  <th className="px-3 py-2 text-right text-emerald-600 font-medium w-24 border-l border-emerald-100">P×Ku×h×N</th>
+                  <th className="px-2 py-2 w-8 print:hidden"></th>
                 </tr>
               </thead>
+
               <tbody>
-                {loads.map((load) => (
-                  <tr key={load.id} className="border-b hover:bg-gray-50 print:border-gray-200">
-                    <td className="px-4 py-2">
-                      <input
-                        type="text"
-                        value={load.name}
-                        onChange={(e) => updateLoad(load.id, 'name', e.target.value)}
-                        className="w-full bg-transparent border-none focus:ring-0 text-black font-medium placeholder-gray-400 print:p-0"
-                        placeholder="Nom..."
-                      />
+                {loads.map((load, idx) => {
+                  const wh     = rowEnergy(load);
+                  const actH   = activeHrsOf(load);
+                  const rowBg  = idx % 2 === 1 ? '#f9fafb' : '#ffffff';
+                  return (
+                    <React.Fragment key={load.id}>
+
+                      {/* ── Ligne A : données principales ── */}
+                      <tr className={`border-b-0 hover:bg-blue-50/30 transition-colors`}
+                          style={{ background: rowBg }}>
+
+                        {/* Appareil sticky */}
+                        <td className="sticky-col px-3 py-2 border-r border-gray-100" style={{ background: rowBg }}>
+                          <input type="text" value={load.name}
+                            onChange={(e) => updateLoad(load.id, 'name', e.target.value)}
+                            className="w-full bg-transparent border-none focus:ring-1 focus:ring-blue-300 rounded text-sm text-gray-800 font-medium placeholder-gray-300 px-1"
+                            placeholder="Nom appareil…"
+                          />
+                        </td>
+
+                        {/* Type */}
+                        <td className="px-2 py-2 text-center">
+                          <select value={load.type}
+                            onChange={(e) => updateLoad(load.id, 'type', e.target.value)}
+                            className="bg-white border border-gray-200 text-gray-700 text-xs rounded-md px-1.5 py-1 w-full focus:ring-1 focus:ring-blue-400">
+                            <option value={LoadType.AC}>AC</option>
+                            <option value={LoadType.DC}>DC</option>
+                          </select>
+                        </td>
+
+                        {/* Puissance */}
+                        <td className="px-2 py-2">
+                          <input type="number" min="0" value={load.power}
+                            onChange={(e) => updateLoad(load.id, 'power', parseFloat(e.target.value) || 0)}
+                            className="w-full bg-blue-50/70 border border-blue-100 rounded px-2 py-1 text-right text-sm font-semibold text-blue-900 focus:ring-1 focus:ring-blue-400"
+                          />
+                        </td>
+
+                        {/* Qté */}
+                        <td className="px-2 py-2">
+                          <input type="number" min="1" value={load.quantity}
+                            onChange={(e) => updateLoad(load.id, 'quantity', parseInt(e.target.value) || 1)}
+                            className="w-full bg-blue-50/70 border border-blue-100 rounded px-2 py-1 text-right text-sm text-blue-900 focus:ring-1 focus:ring-blue-400"
+                          />
+                        </td>
+
+                        {/* Ku */}
+                        <td className="px-2 py-2 border-l border-amber-50">
+                          <input type="number" step="0.05" min="0.1" max="1" value={load.ku ?? 1.0}
+                            onChange={(e) => updateLoad(load.id, 'ku', Math.min(1, Math.max(0.1, parseFloat(e.target.value) || 1.0)))}
+                            className="w-full bg-amber-50 border border-amber-200 rounded px-2 py-1 text-right text-sm font-semibold text-amber-800 focus:ring-1 focus:ring-amber-400"
+                            title="Facteur d'utilisation"
+                          />
+                        </td>
+
+                        {/* Wh/j */}
+                        <td className="px-2 py-2 border-l border-emerald-50 text-right">
+                          <span className={`text-xs font-bold px-1.5 py-0.5 rounded ${wh > 0 ? 'bg-emerald-50 text-emerald-700' : 'text-gray-300'}`}>
+                            {wh > 0 ? wh.toLocaleString() : '—'}
+                          </span>
+                        </td>
+
+                        {/* Supprimer */}
+                        <td className="px-2 py-2 text-center print:hidden">
+                          <button onClick={() => removeLoad(load.id)}
+                            className="text-red-300 hover:text-red-500 hover:bg-red-50 rounded p-1 transition-colors">
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+
+                      {/* ── Ligne B : matrice 24h ── */}
+                      <tr className="border-b border-gray-100" style={{ background: rowBg }}>
+                        <td colSpan={7} className="px-3 pb-2.5 pt-1">
+                          <div className="flex items-center gap-2">
+
+                            {/* Label */}
+                            <span className="text-[10px] text-gray-400 font-medium flex-shrink-0 w-12">⏱ Plage</span>
+
+                            {/* Grille 24 cellules */}
+                            <div className="flex gap-px flex-1 min-w-0">
+                              {Array.from({ length: 24 }, (_, h) => {
+                                const active = !!(load.activeHours?.[h]);
+                                const isPV   = h >= PV_START && h < PV_END;
+                                return (
+                                  <div key={h} className="flex flex-col items-center flex-1" style={{ minWidth: '13px' }}>
+                                    {/* Étiquette heure toutes les 6h */}
+                                    {h % 6 === 0
+                                      ? <span className="text-[7px] text-gray-400 leading-none mb-0.5 select-none">{h}h</span>
+                                      : <span className="text-[7px] leading-none mb-0.5 select-none opacity-0">·</span>
+                                    }
+                                    <button type="button"
+                                      onClick={() => toggleHour(load.id, h, load.activeHours)}
+                                      style={{ height: '18px', width: '100%' }}
+                                      className={`rounded-[2px] border transition-colors duration-75 ${
+                                        active
+                                          ? isPV
+                                            ? 'bg-orange-400 border-orange-500 shadow-sm'
+                                            : 'bg-indigo-500 border-indigo-600 shadow-sm'
+                                          : isPV
+                                            ? 'bg-amber-50 border-amber-200 hover:bg-amber-200'
+                                            : 'bg-gray-100 border-gray-200 hover:bg-gray-300'
+                                      }`}
+                                      title={`${h < 10 ? '0'+h : h}h — ${active ? '✓ actif' : 'inactif'} — ${isPV ? '☀️ fenêtre PV' : '🌙 nuit'}`}
+                                    />
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Compteur h/j */}
+                            <span className={`flex-shrink-0 text-[11px] font-bold px-2 py-0.5 rounded-full ${actH > 0 ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-400'}`}>
+                              {actH}h/j
+                            </span>
+                          </div>
+
+                          {/* Présets rapides */}
+                          <div className="flex items-center gap-1 mt-1.5 ml-14 flex-wrap print:hidden">
+                            {presets.map(p => (
+                              <button key={p.label} type="button"
+                                onClick={() => updateLoad(load.id, 'activeHours', p.fn())}
+                                className="text-[9px] px-1.5 py-0.5 rounded border bg-white hover:bg-gray-50 text-gray-600 border-gray-200 transition-colors leading-none">
+                                {p.label}
+                              </button>
+                            ))}
+                          </div>
+                        </td>
+                      </tr>
+
+                    </React.Fragment>
+                  );
+                })}
+
+                {/* Ligne totaux */}
+                {loads.length > 0 && (
+                  <tr className="bg-gray-800 text-white text-xs font-semibold">
+                    <td className="sticky-col bg-gray-800 px-3 py-2.5 text-left border-r border-gray-600">
+                      TOTAL — {loads.length} type{loads.length > 1 ? 's' : ''}
                     </td>
-                    <td className="px-4 py-2">
-                      <select
-                        value={load.type}
-                        onChange={(e) => updateLoad(load.id, 'type', e.target.value)}
-                        className="bg-gray-50 border border-gray-300 text-black text-xs rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-1 print:border-none print:bg-transparent print:appearance-none print:p-0"
-                      >
-                        <option value={LoadType.AC}>AC</option>
-                        <option value={LoadType.DC}>DC</option>
-                      </select>
+                    <td colSpan={2} className="px-3 py-2.5 text-center text-gray-400">—</td>
+                    <td className="px-3 py-2.5 text-right text-blue-300">{totalQty}</td>
+                    <td className="px-3 py-2.5 border-l border-gray-600 text-center text-gray-400">—</td>
+                    <td className="px-3 py-2.5 border-l border-gray-600 text-right text-emerald-300">
+                      {totalWh.toLocaleString()} Wh/j
                     </td>
-                    <td className="px-4 py-2">
-                      <input
-                        type="number"
-                        min="0"
-                        value={load.power}
-                        onChange={(e) => updateLoad(load.id, 'power', parseFloat(e.target.value) || 0)}
-                        className="w-full bg-gray-50 border border-gray-300 rounded px-2 py-1 text-right text-black print:border-none print:bg-transparent print:p-0"
-                      />
-                    </td>
-                    <td className="px-4 py-2">
-                      <input
-                        type="number"
-                        min="0"
-                        max="24"
-                        value={load.hours}
-                        onChange={(e) => updateLoad(load.id, 'hours', parseFloat(e.target.value) || 0)}
-                        className="w-full bg-gray-50 border border-gray-300 rounded px-2 py-1 text-right text-black print:border-none print:bg-transparent print:p-0"
-                      />
-                    </td>
-                    <td className="px-4 py-2">
-                      <input
-                        type="number"
-                        min="1"
-                        value={load.quantity}
-                        onChange={(e) => updateLoad(load.id, 'quantity', parseInt(e.target.value) || 1)}
-                        className="w-full bg-gray-50 border border-gray-300 rounded px-2 py-1 text-right text-black print:border-none print:bg-transparent print:p-0"
-                      />
-                    </td>
-                    <td className="px-4 py-2 text-center print:hidden">
-                      <button
-                        onClick={() => removeLoad(load.id)}
-                        className="text-red-400 hover:text-red-600 transition-colors"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
-                    </td>
+                    <td className="px-3 py-2.5 print:hidden"></td>
                   </tr>
-                ))}
+                )}
+
                 {loads.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-4 py-6 text-center text-gray-400 italic">
-                      Aucun appareil ajouté. Cliquez sur "Ajouter" pour commencer.
+                    <td colSpan={7} className="px-4 py-8 text-center text-gray-400 italic text-sm">
+                      Aucun appareil. Cliquez sur <strong>+ Ajouter</strong> pour commencer.
                     </td>
                   </tr>
                 )}
@@ -711,10 +1071,14 @@
             </table>
           </div>
 
+          {/* Légende rapide */}
           {loads.length > 0 && (
-            <div className="mt-4 p-3 bg-blue-50 text-blue-800 text-sm rounded-lg flex justify-between print:bg-transparent print:border print:border-blue-100">
-              <span>Total Appareils: {loads.reduce((acc, l) => acc + l.quantity, 0)}</span>
-              <span>Conso. Brute (approx): {Math.round(loads.reduce((acc, l) => acc + (l.power * l.hours * l.quantity), 0))} Wh/j</span>
+            <div className="px-5 py-3 border-t border-gray-100 flex flex-wrap gap-x-4 gap-y-1 text-[10px] text-gray-400 print:hidden">
+              <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 rounded-sm bg-blue-200"/> Charge électrique</span>
+              <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 rounded-sm bg-amber-200"/> Ku = facteur utilisation</span>
+              <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 rounded-sm bg-yellow-200"/> Plage jour (6h–18h)</span>
+              <span className="flex items-center gap-1"><span className="inline-block w-3 h-2 rounded-sm bg-slate-200"/> Plage nuit</span>
+              <span className="ml-auto font-medium text-gray-500">Σ(P×Ku×h×N) = <strong>{totalWh.toLocaleString()} Wh/j</strong></span>
             </div>
           )}
         </div>
@@ -815,6 +1179,52 @@
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
+              </div>
+            </div>
+
+            {/* Facteurs de Correction */}
+            <div id="etape-1">
+              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                <Zap className="w-3 h-3" /> Facteurs de Correction
+                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200 normal-case tracking-normal">Étape 1</span>
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Ks — Simultanéité
+                    <span className="block text-xs text-gray-400 font-normal">0.7–1.0 (défaut: 0.80)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    min="0.1"
+                    max="1"
+                    value={settings.ks ?? 0.80}
+                    onChange={(e) => handleChange('ks', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                    title="Fraction des charges fonctionnant simultanément"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Ke — Extension
+                    <span className="block text-xs text-gray-400 font-normal">1.0–1.3 (défaut: 1.10)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    min="1"
+                    max="1.5"
+                    value={settings.ke ?? 1.10}
+                    onChange={(e) => handleChange('ke', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                    title="Réserve pour extension future de l'installation"
+                  />
+                </div>
+              </div>
+              <div className="mt-2 text-xs text-blue-700 bg-blue-50 px-3 py-2 rounded-lg">
+                Multiplicateur global : <strong>Ks × Ke = {((settings.ks ?? 0.80) * (settings.ke ?? 1.10)).toFixed(2)}</strong>
+                &nbsp;— Ku est saisi par appareil dans le tableau de charges
               </div>
             </div>
 
@@ -925,7 +1335,7 @@
     // =========================================================
     // COMPONENT: ResultsDisplay
     // =========================================================
-    function ResultsDisplay({ results, openCableTool }) {
+    function ResultsDisplay({ results, settings, openCableTool }) {
       const inverterLosses = results.energyAC - results.energyAC_raw;
 
       const energyData = [
@@ -997,13 +1407,94 @@
               </div>
             </div>
 
+            {/* Facteurs appliqués */}
+            {settings && results.ksKe !== undefined && (
+              <div className="mb-4 text-xs bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 grid grid-cols-3 divide-x divide-amber-200 text-center">
+                <div className="pr-2">
+                  <div className="text-amber-600 font-bold uppercase tracking-wide">Ku (par appareil)</div>
+                  <div className="text-gray-700 mt-0.5">Utilisation réelle</div>
+                </div>
+                <div className="px-2">
+                  <div className="text-amber-600 font-bold uppercase tracking-wide">Ks = {(settings.ks ?? 0.80).toFixed(2)}</div>
+                  <div className="text-gray-700 mt-0.5">Simultanéité</div>
+                </div>
+                <div className="pl-2">
+                  <div className="text-amber-600 font-bold uppercase tracking-wide">Ke = {(settings.ke ?? 1.10).toFixed(2)}</div>
+                  <div className="text-gray-700 mt-0.5">Extension future</div>
+                </div>
+              </div>
+            )}
+
             {/* Sections détaillées */}
             <div className="space-y-4">
 
+              {/* Profil Horaire — Étape 3 */}
+              {results.hourlyProfile && results.totalEnergyDaily > 0 && (
+                <div id="etape-3" className="border border-blue-200 rounded-lg p-4 print:border-gray-300">
+                  <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3 text-sm">
+                    <Zap className="w-4 h-4 text-blue-500" /> Profil de Charge Journalier
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200 ml-auto">Étape 3</span>
+                  </h3>
+
+                  {/* Statistiques jour / nuit */}
+                  <div className="grid grid-cols-2 gap-2 mb-3">
+                    <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-2.5 text-center">
+                      <div className="text-xs text-yellow-700 font-semibold mb-0.5">☀️ Énergie de Jour (6h–18h)</div>
+                      <div className="text-lg font-extrabold text-yellow-700">{Math.round(results.energyDay)} <span className="text-xs font-normal">Wh</span></div>
+                      <div className="text-xs text-yellow-600 mt-0.5">
+                        {results.totalEnergyDaily > 0 ? Math.round(results.energyDay / results.totalEnergyDaily * 100) : 0}% — PV direct
+                      </div>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-2.5 text-center">
+                      <div className="text-xs text-blue-700 font-semibold mb-0.5">🌙 Énergie de Nuit</div>
+                      <div className="text-lg font-extrabold text-blue-700">{Math.round(results.energyNight)} <span className="text-xs font-normal">Wh</span></div>
+                      <div className="text-xs text-blue-600 mt-0.5">
+                        {results.totalEnergyDaily > 0 ? Math.round(results.energyNight / results.totalEnergyDaily * 100) : 0}% — via batterie
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Graphique 24h */}
+                  <div style={{ height: 130 }}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={results.hourlyProfile} margin={{ top: 4, right: 4, left: -28, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
+                        <XAxis dataKey="label" tick={{ fontSize: 8 }} interval={1} />
+                        <YAxis tick={{ fontSize: 9 }} unit="W" />
+                        <Tooltip
+                          formatter={(val) => [`${val} W`, 'Puissance']}
+                          labelFormatter={(l) => `${l}`}
+                          contentStyle={{ fontSize: 11 }}
+                        />
+                        {/* Zone PV (fond jaune) */}
+                        <ReferenceLine x="06h" stroke="#fbbf24" strokeDasharray="4 2" label={{ value: '↑PV', fontSize: 8, fill: '#d97706' }} />
+                        <ReferenceLine x="18h" stroke="#fbbf24" strokeDasharray="4 2" label={{ value: 'PV↓', fontSize: 8, fill: '#d97706' }} />
+                        <Bar dataKey="power" radius={[2, 2, 0, 0]} maxBarSize={18}>
+                          {results.hourlyProfile.map((entry) => (
+                            <Cell key={entry.h}
+                              fill={entry.h >= PV_START && entry.h < PV_END ? '#f59e0b' : '#3b82f6'}
+                              fillOpacity={entry.power > 0 ? 0.85 : 0.2}
+                            />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="flex justify-between text-xs text-gray-400 mt-1">
+                    <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-yellow-400" /> Fenêtre PV (6h–18h)</span>
+                    <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm bg-blue-400" /> Hors production</span>
+                    {results.peakHour && results.peakHour.power > 0 && (
+                      <span className="text-orange-600 font-medium">Pic : {results.peakHour.power} W @ {results.peakHour.label}</span>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Générateur PV */}
-              <div className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
+              <div id="etape-5" className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
                 <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
                   <Sun className="w-4 h-4 text-orange-500" /> Générateur PV
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200 ml-auto">Étape 5</span>
                 </h3>
                 <div className="grid grid-cols-2 gap-y-2 text-sm">
                   <span className="text-gray-500">Tension Système:</span>
@@ -1034,9 +1525,10 @@
               </div>
 
               {/* Parc Batterie */}
-              <div className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
+              <div id="etape-6" className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
                 <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
                   <Battery className="w-4 h-4 text-green-500" /> Parc Batterie
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200 ml-auto">Étape 6</span>
                 </h3>
                 <div className="grid grid-cols-2 gap-y-2 text-sm">
                   <span className="text-gray-500">Capacité Ah:</span>
@@ -1070,9 +1562,10 @@
               </div>
 
               {/* Électronique */}
-              <div className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
+              <div id="etape-7" className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
                 <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
-                  <Cpu className="w-4 h-4 text-purple-500" /> Électronique
+                  <Cpu className="w-4 h-4 text-purple-500" /> Régulateur &amp; Onduleur
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200 ml-auto">Étape 7</span>
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   {/* Régulateur */}
@@ -1151,14 +1644,20 @@
                 </div>
               )}
 
-              {/* Bouton Cable Tool */}
-              <button
-                onClick={openCableTool}
-                className="w-full mt-4 flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-900 text-white py-3 rounded-lg transition-all shadow-md print:hidden"
-              >
-                <Ruler className="w-4 h-4" />
-                Calculer les Sections de Câbles
-              </button>
+              {/* Bouton Cable Tool — Étape 11 */}
+              <div id="etape-11" className="mt-4">
+                <div className="flex items-center justify-between mb-1.5 print:hidden">
+                  <span className="text-xs text-gray-500 font-medium">Sections de Câbles</span>
+                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200">Étape 11</span>
+                </div>
+                <button
+                  onClick={openCableTool}
+                  className="w-full flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-900 text-white py-3 rounded-lg transition-all shadow-md print:hidden"
+                >
+                  <Ruler className="w-4 h-4" />
+                  Calculer les Sections de Câbles
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1166,124 +1665,254 @@
     }
 
     // =========================================================
-    // COMPONENT: CableTool (Modal)
+    // COMPONENT: CableTool (Modal) — Étape 11 complète
     // =========================================================
     function CableTool({ isOpen, onClose, results }) {
-      const [segments, setSegments] = useState([
-        { id: 'pv-reg',  label: 'Panneaux → Régulateur',  length: 10, current: 0 },
-        { id: 'reg-bat', label: 'Régulateur → Batteries',  length: 2,  current: 0 },
-        { id: 'bat-inv', label: 'Batteries → Onduleur',    length: 2,  current: 0 },
-        { id: 'inv-load',label: 'Onduleur → Tableau AC',   length: 10, current: 0 },
-      ]);
+      const SEGMENTS_INIT = [
+        { id: 'pv-reg',   label: 'Panneaux → Régulateur MPPT', isAC: false, length: 10 },
+        { id: 'reg-bat',  label: 'Régulateur → Batteries',     isAC: false, length: 2  },
+        { id: 'bat-inv',  label: 'Batteries → Onduleur',       isAC: false, length: 2  },
+        { id: 'inv-load', label: 'Onduleur → Tableau AC',      isAC: true,  length: 10 },
+      ];
+      const CABLE_TYPE = { 'pv-reg': 'H1Z2Z2-K', 'reg-bat': 'H07V-K', 'bat-inv': 'H07V-K', 'inv-load': 'U-1000 R2V' };
 
-      useEffect(() => {
-        const I_pv_reg  = results.peakPower    / results.systemVoltage;
-        const I_reg_bat = results.regulatorAmps;
-        const I_bat_inv = results.inverterPower / results.systemVoltage;
-        const I_inv_load= results.inverterPower / 230;
+      const [lengths, setLengths] = useState({ 'pv-reg': 10, 'reg-bat': 2, 'bat-inv': 2, 'inv-load': 10 });
 
-        setSegments(prev => prev.map(s => {
-          let amps = 0;
-          if (s.id === 'pv-reg')   amps = I_pv_reg;
-          if (s.id === 'reg-bat')  amps = I_reg_bat;
-          if (s.id === 'bat-inv')  amps = I_bat_inv;
-          if (s.id === 'inv-load') amps = I_inv_load;
-          return { ...s, current: amps };
-        }));
-      }, [results]);
-
-      const updateLength = (id, len) => {
-        setSegments(prev => prev.map(s => s.id === id ? { ...s, length: len } : s));
-      };
+      const updateLength = (id, val) => setLengths(prev => ({ ...prev, [id]: parseFloat(val) || 0 }));
 
       if (!isOpen) return null;
 
-      const standardSizes = [1.5, 2.5, 4, 6, 10, 16, 25, 35, 50, 70, 95];
+      // Courants auto-calculés
+      const vSys = results.systemVoltage || 48;
+      const currents = {
+        'pv-reg':   vSys > 0 ? (results.peakPower    || 0) / vSys : 0,
+        'reg-bat':  results.regulatorAmps || 0,
+        'bat-inv':  vSys > 0 ? (results.inverterPower || 0) / vSys : 0,
+        'inv-load': (results.inverterPower || 0) / 230,
+      };
+
+      // Calcul complet par segment
+      const ALLSIZES = [1.5, 2.5, 4, 6, 10, 16, 25, 35, 50, 70, 95];
+      const rho = 0.0225;
+
+      const segData = SEGMENTS_INIT.map(seg => {
+        const I       = currents[seg.id];
+        const L       = lengths[seg.id];
+        const V       = seg.isAC ? 230 : vSys;
+        const dropPct = seg.isAC ? 0.02 : 0.01;
+        const deltaVadm = dropPct * V;
+
+        // Section ΔV
+        const sDV = (deltaVadm > 0 && I > 0) ? (2 * L * rho * I) / deltaVadm : 0;
+        const normDV = ALLSIZES.find(s => s >= sDV) || ALLSIZES[ALLSIZES.length - 1];
+
+        // Section thermique (avec coeff 1.25)
+        const cTable = seg.isAC ? AC_CABLE_TABLE : DC_SOLAR_CABLE_TABLE;
+        const thermEntry = cTable.find(e => e.ampacity >= I * 1.25);
+        const normTherm = thermEntry ? thermEntry.section : ALLSIZES[ALLSIZES.length - 1];
+
+        // Section retenue = max des deux contraintes
+        const sFinal = Math.max(normDV, normTherm);
+
+        // Ampacité de la section retenue
+        const retEntry = cTable.find(e => e.section >= sFinal);
+        const ampacity = retEntry ? retEntry.ampacity : null;
+
+        // ΔV réelle sur section retenue
+        const dvReal = (sFinal > 0 && L > 0 && I > 0) ? (2 * L * rho * I) / sFinal : 0;
+        const dvPct  = V > 0 ? (dvReal / V) * 100 : 0;
+        const dvOk   = dvPct <= dropPct * 100;
+        const thermOk = ampacity ? ampacity >= I * 1.25 : true;
+        const ok = dvOk && thermOk;
+
+        return { ...seg, I, L, V, sDV, normDV, normTherm, sFinal, ampacity, dvPct, dvOk, thermOk, ok,
+          cableType: CABLE_TYPE[seg.id], dropPctMax: dropPct * 100 };
+      });
+
+      const allOk = segData.every(s => s.ok);
+
+      const handleDownloadPDF = () => {
+        const el = document.getElementById('cable-tool-content');
+        if (!el || !window.html2pdf) { alert("PDF non disponible. Utilisez Imprimer."); return; }
+        window.html2pdf().set({
+          margin: [10, 8],
+          filename: `etape11-cables-${new Date().toISOString().split('T')[0]}.pdf`,
+          image: { type: 'jpeg', quality: 0.98 },
+          html2canvas: { scale: 2, useCORS: true },
+          jsPDF: { unit: 'mm', format: 'a4', orientation: 'landscape' }
+        }).from(el).save();
+      };
 
       return (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
-            <div className="p-6 border-b flex justify-between items-center sticky top-0 bg-white z-10">
-              <h2 className="text-xl font-bold text-gray-900">Dimensionnement des Câbles</h2>
-              <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full">
-                <XIcon className="w-5 h-5 text-gray-500" />
-              </button>
+          <div className="bg-white rounded-xl shadow-2xl max-w-5xl w-full max-h-[95vh] overflow-y-auto">
+
+            {/* Header */}
+            <div className="p-5 border-b flex justify-between items-center sticky top-0 bg-white z-10">
+              <div className="flex items-center gap-3 flex-wrap">
+                <Ruler className="w-5 h-5 text-gray-700 flex-shrink-0" />
+                <h2 className="text-xl font-bold text-gray-900">Étape 11 — Dimensionnement des Câbles</h2>
+                <span className={`text-xs font-bold px-2 py-0.5 rounded-full border ${allOk ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'}`}>
+                  {allOk ? '✓ Conforme NFC 15-100' : '✗ Vérification requise'}
+                </span>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button onClick={handleDownloadPDF} className="flex items-center gap-1.5 text-sm bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded-lg transition-colors">
+                  <Download className="w-4 h-4" /> PDF
+                </button>
+                <button onClick={() => window.print()} className="flex items-center gap-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded-lg transition-colors">
+                  <Printer className="w-4 h-4" /> Imprimer
+                </button>
+                <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full ml-1">
+                  <XIcon className="w-5 h-5 text-gray-500" />
+                </button>
+              </div>
             </div>
 
-            <div className="p-6 space-y-6">
-              <div className="text-sm text-gray-600 bg-yellow-50 p-4 rounded-lg border border-yellow-100 space-y-1">
-                <div><strong>DC :</strong> S = 2 × L × ρ × I / ΔU — ΔU ≤ 1% — ρ = 0.0225 Ω·mm²/m (Cu 70°C)</div>
-                <div><strong>AC mono :</strong> S = 2 × L × ρ × I / ΔU — ΔU ≤ 2%</div>
-                <div><strong>AC triphasé :</strong> S = √3 × L × ρ × I / ΔU — ΔU ≤ 2%</div>
-                <div className="text-xs text-orange-600 font-medium mt-1">⚡ Câbles DC solaires : H1Z2Z2-K (double isolation, UV, 1500 V DC, 120°C)</div>
+            <div id="cable-tool-content" className="p-6 space-y-6">
+
+              {/* Rappel formules + types câbles */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <div className="font-bold text-yellow-800 mb-2">Formules NFC 15-100</div>
+                  <div className="font-mono text-xs space-y-1 text-yellow-900">
+                    <div>DC : S = 2·L·ρ·I / ΔU &nbsp;— ΔU ≤ 1%</div>
+                    <div>AC : S = 2·L·ρ·I / ΔU &nbsp;— ΔU ≤ 2%</div>
+                    <div>ρ Cu (70 °C) = 0.0225 Ω·mm²/m</div>
+                    <div className="mt-1 text-orange-700 font-semibold">Coeff. thermique : I × 1.25</div>
+                  </div>
+                </div>
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                  <div className="font-bold text-blue-800 mb-2">Types de câbles retenus</div>
+                  <div className="text-xs space-y-1.5 text-blue-900">
+                    <div><span className="font-mono bg-yellow-100 text-yellow-800 px-1.5 py-0.5 rounded mr-2">H1Z2Z2-K</span>DC solaire — UV, 1 500 V, 120 °C</div>
+                    <div><span className="font-mono bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded mr-2">H07V-K</span>DC interne — souple, 450/750 V</div>
+                    <div><span className="font-mono bg-green-100 text-green-800 px-1.5 py-0.5 rounded mr-2">U-1000 R2V</span>AC distribution — 0,6/1 kV</div>
+                  </div>
+                </div>
               </div>
 
-              <div className="space-y-4">
-                {segments.map(segment => {
-                  const isDC = segment.id !== 'inv-load';
-                  const voltage = isDC ? results.systemVoltage : 230;
-                  const dropRate = isDC ? 0.01 : 0.02;
-                  const section = calculateCableSection(segment.length, segment.current, voltage, dropRate, false);
-                  const standardSizes = [1.5, 2.5, 4, 6, 10, 16, 25, 35, 50, 70, 95];
-                  const recommended = standardSizes.find(s => s >= section) || standardSizes[standardSizes.length - 1];
-                  // Vérification ampacité thermique H1Z2Z2-K pour DC
-                  const dcEntry = isDC ? DC_SOLAR_CABLE_TABLE.find(e => e.section >= recommended) : null;
-                  const thermalOk = isDC && dcEntry ? dcEntry.ampacity >= segment.current * 1.25 : true;
-                  const finalSection = isDC && dcEntry && !thermalOk
-                    ? (DC_SOLAR_CABLE_TABLE.find(e => e.ampacity >= segment.current * 1.25) || DC_SOLAR_CABLE_TABLE[DC_SOLAR_CABLE_TABLE.length-1]).section
-                    : recommended;
-
-                  return (
-                    <div key={segment.id} className="bg-gray-50 p-4 rounded-lg border border-gray-200">
-                      <div className="flex justify-between items-start mb-2">
-                        <div>
-                          <h3 className="font-semibold text-gray-800">{segment.label}</h3>
-                          <span className="text-xs text-gray-400">{isDC ? 'H1Z2Z2-K — ΔV ≤ 1%' : 'U-1000 R2V Cu — ΔV ≤ 2%'}</span>
-                        </div>
-                        <span className="text-xs bg-gray-200 px-2 py-1 rounded text-gray-600">
-                          {Math.round(segment.current)} A / {voltage} V
-                        </span>
+              {/* Fiches segments */}
+              <div className="space-y-3">
+                {segData.map(seg => (
+                  <div key={seg.id} className={`rounded-xl border-2 p-4 transition-colors ${seg.ok ? 'border-green-200 bg-green-50' : 'border-red-200 bg-red-50'}`}>
+                    <div className="flex justify-between items-start mb-3 flex-wrap gap-2">
+                      <div>
+                        <h3 className="font-bold text-gray-900 text-base">{seg.label}</h3>
+                        <span className="text-xs text-gray-500 font-mono">{seg.cableType} — {seg.isAC ? 'AC 230V' : `DC ${seg.V}V`} — ΔV ≤ {seg.dropPctMax}%</span>
                       </div>
-                      <div className="flex items-end gap-4">
-                        <div className="flex-1">
-                          <label className="block text-xs font-medium text-gray-500 mb-1">Longueur (mètres)</label>
-                          <input
-                            type="number"
-                            value={segment.length}
-                            onChange={(e) => updateLength(segment.id, parseFloat(e.target.value) || 0)}
-                            className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-sm text-black"
-                          />
+                      <span className={`text-xs font-bold px-3 py-1 rounded-full border ${seg.ok ? 'bg-green-200 text-green-800 border-green-300' : 'bg-red-200 text-red-800 border-red-300'}`}>
+                        {seg.ok ? '✓ Conforme' : '✗ Non conforme'}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-sm">
+                      {/* Courant */}
+                      <div className="bg-white/70 rounded-lg p-2.5 border border-gray-200">
+                        <div className="text-xs text-gray-500 mb-1">Courant (I)</div>
+                        <div className="font-bold text-gray-900">{seg.I.toFixed(1)} A</div>
+                        <div className="text-xs text-gray-400">{seg.V} V</div>
+                      </div>
+                      {/* Longueur */}
+                      <div className="bg-white/70 rounded-lg p-2.5 border border-gray-200">
+                        <label className="block text-xs text-gray-500 mb-1">Longueur (L)</label>
+                        <input
+                          type="number" min="0.5" step="0.5"
+                          value={seg.L}
+                          onChange={e => updateLength(seg.id, e.target.value)}
+                          className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-sm font-bold text-black focus:ring-orange-500 focus:border-orange-500"
+                        />
+                        <div className="text-xs text-gray-400 mt-0.5">mètres</div>
+                      </div>
+                      {/* Section ΔV */}
+                      <div className="bg-white/70 rounded-lg p-2.5 border border-gray-200">
+                        <div className="text-xs text-gray-500 mb-1">Section ΔV calc.</div>
+                        <div className="font-semibold text-gray-800">{seg.sDV.toFixed(2)} mm²</div>
+                        <div className="text-xs text-gray-400">→ norm. {seg.normDV} mm²</div>
+                      </div>
+                      {/* Section thermique */}
+                      <div className="bg-white/70 rounded-lg p-2.5 border border-gray-200">
+                        <div className="text-xs text-gray-500 mb-1">Section thermique</div>
+                        <div className="font-semibold text-gray-800">{seg.normTherm} mm²</div>
+                        <div className="text-xs text-gray-400">I × 1.25 = {(seg.I * 1.25).toFixed(1)} A</div>
+                      </div>
+                      {/* Section retenue */}
+                      <div className={`rounded-lg p-2.5 border-2 ${seg.ok ? 'bg-green-100 border-green-300' : 'bg-red-100 border-red-300'}`}>
+                        <div className="text-xs text-gray-600 mb-0.5 font-medium">Section retenue</div>
+                        <div className={`text-2xl font-extrabold ${seg.ok ? 'text-green-700' : 'text-red-700'}`}>{seg.sFinal} <span className="text-sm font-semibold">mm²</span></div>
+                        <div className={`text-xs font-semibold mt-0.5 ${seg.dvOk ? 'text-green-700' : 'text-red-600'}`}>
+                          ΔV = {seg.dvPct.toFixed(2)}% {seg.dvOk ? '✓' : `✗ > ${seg.dropPctMax}%`}
                         </div>
-                        <div className="flex items-center pb-2 text-gray-400">
-                          <ArrowRight className="w-5 h-5" />
-                        </div>
-                        <div className="flex-1">
-                          <label className="block text-xs font-medium text-gray-500 mb-1">Section ΔV calculée</label>
-                          <div className="text-lg font-bold text-gray-900">
-                            {section.toFixed(2)} <span className="text-sm font-normal">mm²</span>
+                        {seg.ampacity && (
+                          <div className={`text-xs font-semibold ${seg.thermOk ? 'text-green-700' : 'text-red-600'}`}>
+                            Amp. {seg.ampacity} A {seg.thermOk ? '✓' : '✗'}
                           </div>
-                        </div>
-                        <div className="flex-1 bg-green-50 p-2 rounded border border-green-100">
-                          <label className="block text-xs font-medium text-green-700 mb-1">
-                            Section retenue
-                            {isDC && !thermalOk && <span className="text-orange-600"> (thermique)</span>}
-                          </label>
-                          <div className="text-lg font-bold text-green-700">
-                            {finalSection} <span className="text-sm font-normal">mm²</span>
-                          </div>
-                        </div>
+                        )}
                       </div>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
+
+              {/* Tableau récapitulatif */}
+              <div>
+                <h3 className="font-bold text-gray-800 mb-3 flex items-center gap-2 text-sm">
+                  <LayoutGrid className="w-4 h-4 text-orange-500" /> Tableau Récapitulatif — Nomenclature Câbles
+                </h3>
+                <div className="overflow-x-auto rounded-lg border border-gray-200">
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-800 text-white uppercase tracking-wide">
+                      <tr>
+                        <th className="px-3 py-2.5 text-left">Segment</th>
+                        <th className="px-3 py-2.5 text-right">I (A)</th>
+                        <th className="px-3 py-2.5 text-right">L (m)</th>
+                        <th className="px-3 py-2.5 text-right">S ΔV (mm²)</th>
+                        <th className="px-3 py-2.5 text-right">S therm. (mm²)</th>
+                        <th className="px-3 py-2.5 text-right font-bold">S retenue (mm²)</th>
+                        <th className="px-3 py-2.5 text-right">Ampacité (A)</th>
+                        <th className="px-3 py-2.5 text-right">ΔV réelle (%)</th>
+                        <th className="px-3 py-2.5 text-center">Type câble</th>
+                        <th className="px-3 py-2.5 text-center">Statut</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {segData.map((seg, i) => (
+                        <tr key={seg.id} className={i % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
+                          <td className="px-3 py-2 font-semibold text-gray-800">{seg.label}</td>
+                          <td className="px-3 py-2 text-right text-gray-700">{seg.I.toFixed(1)}</td>
+                          <td className="px-3 py-2 text-right text-gray-700">{seg.L}</td>
+                          <td className="px-3 py-2 text-right text-gray-500">{seg.sDV.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-right text-gray-500">{seg.normTherm}</td>
+                          <td className="px-3 py-2 text-right font-extrabold text-gray-900 text-sm">{seg.sFinal}</td>
+                          <td className="px-3 py-2 text-right">{seg.ampacity ?? '—'}</td>
+                          <td className={`px-3 py-2 text-right font-semibold ${seg.dvOk ? 'text-green-600' : 'text-red-600'}`}>
+                            {seg.dvPct.toFixed(2)}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <span className="font-mono bg-gray-100 text-gray-700 px-1.5 py-0.5 rounded text-[10px]">{seg.cableType}</span>
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            <span className={`text-base font-bold ${seg.ok ? 'text-green-600' : 'text-red-600'}`}>{seg.ok ? '✓' : '✗'}</span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="mt-2 text-xs text-gray-400 italic">
+                  Ampacité vérifiée avec coeff. 1.25 (NFC 15-100). DC solaire : table H1Z2Z2-K pose en plein air. AC : U-1000 R2V pose en conduit (méthode B2).
+                </p>
+              </div>
+
             </div>
 
-            <div className="p-6 border-t bg-gray-50 flex justify-end">
-              <button
-                onClick={onClose}
-                className="px-6 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 transition-colors"
-              >
+            {/* Footer */}
+            <div className="p-5 border-t bg-gray-50 flex justify-between items-center flex-wrap gap-3">
+              <div className={`text-sm font-bold flex items-center gap-2 ${allOk ? 'text-green-700' : 'text-red-700'}`}>
+                {allOk
+                  ? '✅ Tous les câbles sont conformes NFC 15-100'
+                  : '⚠️ Corriger les longueurs ou vérifier les sections en rouge'}
+              </div>
+              <button onClick={onClose} className="px-6 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 transition-colors font-medium">
                 Fermer
               </button>
             </div>
@@ -1433,10 +2062,11 @@
             </div>
 
             {/* Températures & Configuration */}
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+            <div id="etape-8" className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
               <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 mb-5">
                 <GitBranch className="w-5 h-5 text-blue-500" />
-                Températures & Configuration Strings
+                Températures &amp; Configuration Strings
+                <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200">Étape 8</span>
               </h2>
               <div className="grid grid-cols-2 gap-4 mb-4">
                 <InputField label="T min cellule" unit="°C (ex: 15 pour CI)" field="tMinCell" step="1" note="Nuit froide / saison sèche" />
@@ -1614,7 +2244,7 @@
               </div>
 
               {/* DC Box (Étape 9) */}
-              <div className="bg-white p-5 rounded-xl shadow-sm border border-yellow-200">
+              <div id="etape-9" className="bg-white p-5 rounded-xl shadow-sm border border-yellow-200">
                 <h3 className="font-semibold text-gray-800 mb-3 text-sm flex items-center gap-2">
                   <Zap className="w-4 h-4 text-yellow-500" /> DC Box — Étape 9
                 </h3>
@@ -1645,7 +2275,7 @@
               </div>
 
               {/* AC Box (Étape 10) */}
-              <div className="bg-white p-5 rounded-xl shadow-sm border border-purple-200">
+              <div id="etape-10" className="bg-white p-5 rounded-xl shadow-sm border border-purple-200">
                 <h3 className="font-semibold text-gray-800 mb-3 text-sm flex items-center gap-2">
                   <Cpu className="w-4 h-4 text-purple-500" /> AC Box — Étape 10
                 </h3>
@@ -1686,11 +2316,19 @@
     // COMPONENT: App (Main)
     // =========================================================
     function App() {
-      const [loads, setLoads] = useState([
-        { id: '1', name: 'Lampes LED',    type: LoadType.AC, power: 10,  hours: 6,  quantity: 5 },
-        { id: '2', name: 'Téléviseur',    type: LoadType.AC, power: 80,  hours: 4,  quantity: 1 },
-        { id: '3', name: 'Réfrigérateur', type: LoadType.AC, power: 150, hours: 12, quantity: 1 },
-      ]);
+      const [loads, setLoads] = useState(() => {
+        // Génère un tableau activeHours[24] depuis start + durée
+        const mkH = (s, d) => Array.from({ length: 24 }, (_, i) => {
+          if (d >= 24) return true;
+          const e = (s + d) % 24;
+          return s < e ? (i >= s && i < e) : (i >= s || i < e);
+        });
+        return [
+          { id: '1', name: 'Lampes LED',    type: LoadType.AC, power: 10,  quantity: 5, ku: 0.80, activeHours: mkH(18, 6)  },
+          { id: '2', name: 'Téléviseur',    type: LoadType.AC, power: 80,  quantity: 1, ku: 1.00, activeHours: mkH(19, 4)  },
+          { id: '3', name: 'Réfrigérateur', type: LoadType.AC, power: 150, quantity: 1, ku: 0.75, activeHours: mkH(6,  12) },
+        ];
+      });
 
       const [settings, setSettings] = useState(DEFAULT_SETTINGS);
 
@@ -1711,6 +2349,11 @@
         batteriesParallel: 0,
         regulatorAmps: 0,
         inverterPower: 0,
+        ksKe: 1,
+        energyDay: 0,
+        energyNight: 0,
+        hourlyProfile: Array.from({ length: 24 }, (_, h) => ({ h, label: h < 10 ? `0${h}h` : `${h}h`, power: 0 })),
+        peakHour: { power: 0 },
       });
 
       const [isCableToolOpen, setIsCableToolOpen] = useState(false);
@@ -1834,6 +2477,9 @@
             </div>
           </div>
 
+          {/* Barre de progression 12 étapes */}
+          <StepProgress activeTab={activeTab} setActiveTab={setActiveTab} />
+
           <main id="report-container" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 print:py-4 print:px-0">
             {activeTab === 'dimensionnement' ? (
               <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 print:block">
@@ -1892,6 +2538,7 @@
                   <div className="sticky top-32 print:static">
                     <ResultsDisplay
                       results={results}
+                      settings={settings}
                       openCableTool={() => setIsCableToolOpen(true)}
                     />
                   </div>
