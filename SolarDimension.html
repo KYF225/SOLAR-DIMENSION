@@ -1,0 +1,1927 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SolarDimension - Dimensionnement PV</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- html2pdf.js for PDF export -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"
+    integrity="sha512-GsLlZN/3F2ErC5ifS5QtgpiJtWd43JWSuIgh7mbzZ8zBps+dvLusV+eNQATqgA/HdeKFVgA5v3S/cIrLF7QnIg=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- React 18 UMD -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- PropTypes (required by Recharts UMD) -->
+  <script crossorigin src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js"></script>
+
+  <!-- Recharts 2.x UMD (compatible React 18) -->
+  <script src="https://unpkg.com/recharts@2.12.7/umd/Recharts.js"></script>
+
+  <!-- Babel Standalone for JSX transform -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    body { font-family: 'Inter', sans-serif; background-color: #f3f4f6; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+    const { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } = Recharts;
+
+    // =========================================================
+    // CONSTANTS & DATA
+    // =========================================================
+    const LoadType = { AC: 'AC', DC: 'DC' };
+
+    const DEFAULT_SETTINGS = {
+      irradiation: 5,
+      autonomyDays: 2,
+      batteryVoltage: 12,
+      batteryCapacity: 200,
+      panelPower: 300,
+      panelVoltage: 30,
+      inverterEfficiency: 0.90,
+      kFactor: 0.65,
+      dischargeLimit: 0.80,
+      inverterNominalKW: 0,  // 0 = calculé auto à partir des charges
+    };
+
+    // =========================================================
+    // STRING DIMENSIONING DEFAULTS
+    // =========================================================
+    const DEFAULT_STRING_SETTINGS = {
+      // Paramètres panneau STC
+      voc: 49.90, vmpp: 41.96, isc: 13.98, impp: 13.11,
+      beta: -0.272, alpha: 0.044, vsysMax: 1500, fuseMax: 25,
+      // Paramètres onduleur DC
+      vdcMax: 1100, vmpptMin: 200, vmpptMax: 1000, vstartup: 200,
+      imppMaxMPPT: 30, iscMaxMPPT: 40, nMPPT: 6, inputsPerMPPT: 2,
+      // Paramètres onduleur AC
+      pacNominal: 60, phaseType: 'tri', cosPhiAC: 0.90,
+      // Températures cellule
+      tMinCell: 15, tMaxCell: 70,
+      // Configuration à évaluer
+      nPanelsSeries: 11, nStringsParallel: 2,
+    };
+
+    const BATTERY_PRESETS = [
+      // ─── Plomb GEL 12V ───────────────────────────────────────────────────────────
+      { label: 'Victron Energy GEL Deep Cycle 12V 60Ah',  voltage: 12, capacity:  60, discharge: 0.50 },
+      { label: 'Victron Energy GEL Deep Cycle 12V 90Ah',  voltage: 12, capacity:  90, discharge: 0.50 },
+      { label: 'Victron Energy GEL Deep Cycle 12V 110Ah', voltage: 12, capacity: 110, discharge: 0.50 },
+      { label: 'Victron Energy GEL Deep Cycle 12V 130Ah', voltage: 12, capacity: 130, discharge: 0.50 },
+      { label: 'Victron Energy GEL Deep Cycle 12V 165Ah', voltage: 12, capacity: 165, discharge: 0.50 },
+      { label: 'Victron Energy GEL Deep Cycle 12V 200Ah', voltage: 12, capacity: 200, discharge: 0.50 },
+      { label: 'Victron Energy GEL Deep Cycle 12V 220Ah', voltage: 12, capacity: 220, discharge: 0.50 },
+      { label: 'Haze HZY12-65 GEL 12V 65Ah',             voltage: 12, capacity:  65, discharge: 0.50 },
+      { label: 'Haze HZY12-100 GEL 12V 100Ah',           voltage: 12, capacity: 100, discharge: 0.50 },
+      { label: 'Narada 6-GFM-100 GEL 12V 100Ah',         voltage: 12, capacity: 100, discharge: 0.50 },
+      { label: 'Generic GEL 12V 50Ah',                   voltage: 12, capacity:  50, discharge: 0.50 },
+      { label: 'Generic GEL 12V 150Ah',                  voltage: 12, capacity: 150, discharge: 0.50 },
+      { label: 'Generic GEL 12V 250Ah',                  voltage: 12, capacity: 250, discharge: 0.50 },
+
+      // ─── Plomb AGM 12V ───────────────────────────────────────────────────────────
+      { label: 'Victron SuperCycle AGM 12V 25Ah',        voltage: 12, capacity:  25, discharge: 0.50 },
+      { label: 'Victron SuperCycle AGM 12V 50Ah',        voltage: 12, capacity:  50, discharge: 0.50 },
+      { label: 'Victron SuperCycle AGM 12V 90Ah',        voltage: 12, capacity:  90, discharge: 0.50 },
+      { label: 'Victron SuperCycle AGM 12V 130Ah',       voltage: 12, capacity: 130, discharge: 0.50 },
+      { label: 'Victron SuperCycle AGM 12V 180Ah',       voltage: 12, capacity: 180, discharge: 0.50 },
+      { label: 'Victron SuperCycle AGM 12V 230Ah',       voltage: 12, capacity: 230, discharge: 0.50 },
+      { label: 'Trojan T105-AGM 6V 225Ah',               voltage:  6, capacity: 225, discharge: 0.50 },
+      { label: 'Rolls AGM S6-460 6V 460Ah',              voltage:  6, capacity: 460, discharge: 0.50 },
+      { label: 'Haze HZB12-100 AGM 12V 100Ah',          voltage: 12, capacity: 100, discharge: 0.50 },
+      { label: 'Generic AGM 12V 75Ah',                   voltage: 12, capacity:  75, discharge: 0.50 },
+      { label: 'Generic AGM 12V 150Ah',                  voltage: 12, capacity: 150, discharge: 0.50 },
+      { label: 'Generic AGM 12V 200Ah',                  voltage: 12, capacity: 200, discharge: 0.50 },
+
+      // ─── OPzS 2V (tubulaire noyé – industriel) ───────────────────────────────────
+      { label: 'OPzS 2V 200Ah (tubulaire noyé)',         voltage:  2, capacity:  200, discharge: 0.50 },
+      { label: 'OPzS 2V 250Ah (tubulaire noyé)',         voltage:  2, capacity:  250, discharge: 0.50 },
+      { label: 'OPzS 2V 400Ah (tubulaire noyé)',         voltage:  2, capacity:  400, discharge: 0.50 },
+      { label: 'OPzS 2V 500Ah (tubulaire noyé)',         voltage:  2, capacity:  500, discharge: 0.50 },
+      { label: 'OPzS 2V 600Ah (tubulaire noyé)',         voltage:  2, capacity:  600, discharge: 0.50 },
+      { label: 'OPzS 2V 800Ah (tubulaire noyé)',         voltage:  2, capacity:  800, discharge: 0.50 },
+      { label: 'OPzS 2V 1000Ah (tubulaire noyé)',        voltage:  2, capacity: 1000, discharge: 0.50 },
+      { label: 'OPzS 2V 1500Ah (tubulaire noyé)',        voltage:  2, capacity: 1500, discharge: 0.50 },
+      { label: 'OPzS 2V 2000Ah (tubulaire noyé)',        voltage:  2, capacity: 2000, discharge: 0.50 },
+      { label: 'OPzS 2V 3000Ah (tubulaire noyé)',        voltage:  2, capacity: 3000, discharge: 0.50 },
+
+      // ─── OPzV 2V (gel tubulaire – industriel) ────────────────────────────────────
+      { label: 'OPzV GEL 2V 200Ah (gel tubulaire)',      voltage:  2, capacity:  200, discharge: 0.50 },
+      { label: 'OPzV GEL 2V 300Ah (gel tubulaire)',      voltage:  2, capacity:  300, discharge: 0.50 },
+      { label: 'OPzV GEL 2V 500Ah (gel tubulaire)',      voltage:  2, capacity:  500, discharge: 0.50 },
+      { label: 'OPzV GEL 2V 800Ah (gel tubulaire)',      voltage:  2, capacity:  800, discharge: 0.50 },
+      { label: 'OPzV GEL 2V 1000Ah (gel tubulaire)',     voltage:  2, capacity: 1000, discharge: 0.50 },
+      { label: 'OPzV GEL 2V 1500Ah (gel tubulaire)',     voltage:  2, capacity: 1500, discharge: 0.50 },
+      { label: 'OPzV GEL 2V 2000Ah (gel tubulaire)',     voltage:  2, capacity: 2000, discharge: 0.50 },
+
+      // ─── LiFePO4 12V ─────────────────────────────────────────────────────────────
+      { label: 'Victron LiFePO4 12.8V 100Ah',           voltage: 12, capacity: 100, discharge: 0.80 },
+      { label: 'Victron LiFePO4 12.8V 200Ah',           voltage: 12, capacity: 200, discharge: 0.80 },
+      { label: 'Victron LiFePO4 12.8V 300Ah',           voltage: 12, capacity: 300, discharge: 0.80 },
+      { label: 'Generic LiFePO4 12V 50Ah',              voltage: 12, capacity:  50, discharge: 0.80 },
+      { label: 'Generic LiFePO4 12V 100Ah',             voltage: 12, capacity: 100, discharge: 0.80 },
+      { label: 'Generic LiFePO4 12V 150Ah',             voltage: 12, capacity: 150, discharge: 0.80 },
+
+      // ─── LiFePO4 24V ─────────────────────────────────────────────────────────────
+      { label: 'Victron LiFePO4 25.6V 100Ah',           voltage: 24, capacity: 100, discharge: 0.80 },
+      { label: 'Victron LiFePO4 25.6V 200Ah',           voltage: 24, capacity: 200, discharge: 0.80 },
+      { label: 'Generic LiFePO4 24V 50Ah',              voltage: 24, capacity:  50, discharge: 0.80 },
+      { label: 'Generic LiFePO4 24V 100Ah',             voltage: 24, capacity: 100, discharge: 0.80 },
+      { label: 'Generic LiFePO4 24V 200Ah',             voltage: 24, capacity: 200, discharge: 0.80 },
+
+      // ─── LiFePO4 48V – Modules rack ──────────────────────────────────────────────
+      { label: 'Pylontech US2000C LiFePO4 48V 50Ah (2.4kWh)',  voltage: 48, capacity:  50, discharge: 0.80 },
+      { label: 'Pylontech US3000C LiFePO4 48V 74Ah (3.5kWh)',  voltage: 48, capacity:  74, discharge: 0.80 },
+      { label: 'Pylontech US5000 LiFePO4 48V 100Ah (5kWh)',    voltage: 48, capacity: 100, discharge: 0.80 },
+      { label: 'Victron LiFePO4 51.2V 200Ah (10.2kWh)',        voltage: 48, capacity: 200, discharge: 0.80 },
+      { label: 'Generic LiFePO4 48V 50Ah',                     voltage: 48, capacity:  50, discharge: 0.80 },
+      { label: 'Generic LiFePO4 48V 100Ah',                    voltage: 48, capacity: 100, discharge: 0.80 },
+      { label: 'Generic LiFePO4 48V 150Ah',                    voltage: 48, capacity: 150, discharge: 0.80 },
+      { label: 'Generic LiFePO4 48V 200Ah',                    voltage: 48, capacity: 200, discharge: 0.80 },
+
+      // ─── LiFePO4 Haute Tension ────────────────────────────────────────────────────
+      { label: 'BYD HVS 5.1kWh LiFePO4 102V 50Ah',            voltage: 102, capacity:  50, discharge: 0.80 },
+      { label: 'BYD HVS 10.2kWh LiFePO4 102V 100Ah',          voltage: 102, capacity: 100, discharge: 0.80 },
+      { label: 'BYD HVM 8.28kWh LiFePO4 204V 40.5Ah',         voltage: 204, capacity:  41, discharge: 0.80 },
+      { label: 'Pylontech Force H1 LiFePO4 48V 200Ah (10kWh)', voltage:  48, capacity: 200, discharge: 0.80 },
+      { label: 'Pylontech Force H2 LiFePO4 48V 400Ah (19.2kWh)', voltage: 48, capacity: 400, discharge: 0.80 },
+    ];
+
+    // =========================================================
+    // CALCULATIONS
+    // =========================================================
+    function calculateSolarSystem(loads, settings) {
+      let rawEnergyAC = 0;
+      let rawEnergyDC = 0;
+      let maxPowerApparent = 0;
+
+      loads.forEach(load => {
+        const energy = load.power * load.hours * load.quantity;
+        const totalPower = load.power * load.quantity;
+        if (load.type === LoadType.AC) {
+          rawEnergyAC += energy;
+          maxPowerApparent += totalPower;
+        } else {
+          rawEnergyDC += energy;
+        }
+      });
+
+      const correctedEnergyAC = rawEnergyAC / settings.inverterEfficiency;
+      const totalEnergyDaily = correctedEnergyAC + rawEnergyDC;
+      const peakPower = totalEnergyDaily / (settings.kFactor * settings.irradiation);
+
+      let systemVoltage = 12;
+      if (peakPower >= 500 && peakPower <= 2000) systemVoltage = 24;
+      else if (peakPower > 2000) systemVoltage = 48;
+
+      const totalPanelsRaw = peakPower / settings.panelPower;
+      const totalPanels = Math.ceil(totalPanelsRaw);
+
+      let panelsSeries = Math.ceil(systemVoltage / (settings.panelVoltage * 0.8));
+      if (panelsSeries < 1) panelsSeries = 1;
+
+      const panelsParallel = Math.ceil(totalPanels / panelsSeries);
+      const finalTotalPanels = panelsSeries * panelsParallel;
+
+      const batteryBankCapacity = (totalEnergyDaily * settings.autonomyDays) / (settings.dischargeLimit * systemVoltage);
+      const batteryBankCapacityKWh = (batteryBankCapacity * systemVoltage) / 1000;
+
+      const batteriesSeries = systemVoltage / settings.batteryVoltage;
+      const batteriesParallel = Math.ceil(batteryBankCapacity / settings.batteryCapacity);
+      const totalBatteries = batteriesSeries * batteriesParallel;
+
+      const regulatorAmps = (finalTotalPanels * settings.panelPower) / systemVoltage;
+      const inverterPower = maxPowerApparent * 1.5;
+
+      return {
+        totalEnergyDaily,
+        energyAC: correctedEnergyAC,
+        energyAC_raw: rawEnergyAC,
+        energyDC: rawEnergyDC,
+        peakPower,
+        systemVoltage,
+        totalPanels: finalTotalPanels,
+        panelsSeries,
+        panelsParallel,
+        batteryBankCapacity,
+        batteryBankCapacityKWh,
+        totalBatteries,
+        batteriesSeries,
+        batteriesParallel,
+        regulatorAmps,
+        inverterPower,
+      };
+    }
+
+    function calculateCableSection(length, current, voltage, dropPercent = 0.02, isAC3ph = false) {
+      // ρ Cu à 70°C = 0.0225 Ω·mm²/m (NFC 15-100 / guide ELEKTRA)
+      const rho = 0.0225;
+      const deltaU = dropPercent * voltage;
+      if (deltaU === 0) return 0;
+      // DC : ΔV = 2 × L × I × ρ / S  → S = 2LIρ/ΔU
+      // AC 3ph : ΔV = √3 × L × I × ρ / S → S = √3LIρ/ΔU
+      const factor = isAC3ph ? Math.sqrt(3) : 2;
+      return (factor * length * rho * current) / deltaU;
+    }
+
+    // Table câbles solaires H1Z2Z2-K (ampacité en pose libre, 70°C)
+    const DC_SOLAR_CABLE_TABLE = [
+      { section: 4,  ampacity: 38 },
+      { section: 6,  ampacity: 49 },
+      { section: 10, ampacity: 66 },
+      { section: 16, ampacity: 88 },
+      { section: 25, ampacity: 117 },
+      { section: 35, ampacity: 142 },
+      { section: 50, ampacity: 170 },
+    ];
+
+    function calculateStringConfig(s) {
+      const beta  = s.beta  / 100;
+      const alpha = s.alpha / 100;
+
+      // Tensions corrigées en température
+      const vocTmin  = s.voc  * (1 + beta  * (s.tMinCell - 25));
+      const vocTmax  = s.voc  * (1 + beta  * (s.tMaxCell - 25));
+      const vmppTmin = s.vmpp * (1 + beta  * (s.tMinCell - 25));
+      const vmppTmax = s.vmpp * (1 + beta  * (s.tMaxCell - 25));
+      const iscTmax  = s.isc  * (1 + alpha * (s.tMaxCell - 25));
+      const imppTmax = s.impp * (1 + alpha * (s.tMaxCell - 25));
+
+      // Plage admissible de panneaux/string
+      const nMax = Math.floor(s.vdcMax   / vocTmin);
+      const nMin = Math.ceil (s.vmpptMin / vmppTmax);
+
+      const N  = s.nPanelsSeries;
+      const Np = s.nStringsParallel;
+
+      // Tensions string pour N choisi
+      const vStringVocTmin  = N * vocTmin;
+      const vStringVocSTC   = N * s.voc;
+      const vStringVmppSTC  = N * s.vmpp;
+      const vStringVmppTmax = N * vmppTmax;
+
+      // Courants par MPPT (Np strings en parallèle)
+      const iMpptImpp     = Np * s.impp;
+      const iMpptIsc      = Np * s.isc;
+      const iMpptImppTmax = Np * imppTmax;
+      const iMpptIscTmax  = Np * iscTmax;
+
+      const totalInputs = s.nMPPT * s.inputsPerMPPT;
+
+      const checks = [
+        { label: 'Voc(Tmin)×N < Vdc_max onduleur',
+          formula: `${vStringVocTmin.toFixed(1)} V < ${s.vdcMax} V`,
+          ok: vStringVocTmin < s.vdcMax },
+        { label: 'Vmpp(STC) dans plage MPPT',
+          formula: `${s.vmpptMin} ≤ ${vStringVmppSTC.toFixed(1)} ≤ ${s.vmpptMax} V`,
+          ok: vStringVmppSTC >= s.vmpptMin && vStringVmppSTC <= s.vmpptMax },
+        { label: 'Vmpp(Tmax) > V_startup onduleur',
+          formula: `${vStringVmppTmax.toFixed(1)} V > ${s.vstartup} V`,
+          ok: vStringVmppTmax > s.vstartup },
+        { label: 'N dans la plage [Nmin ; Nmax]',
+          formula: `${nMin} ≤ ${N} ≤ ${nMax}`,
+          ok: N >= nMin && N <= nMax },
+        { label: 'Isc par MPPT < Isc_max MPPT',
+          formula: `${iMpptIsc.toFixed(2)} A < ${s.iscMaxMPPT} A`,
+          ok: iMpptIsc < s.iscMaxMPPT },
+        { label: 'Impp par MPPT < Imp_max MPPT',
+          formula: `${iMpptImpp.toFixed(2)} A < ${s.imppMaxMPPT} A`,
+          ok: iMpptImpp < s.imppMaxMPPT },
+        { label: 'Voc(Tmin)×N < Vsys_max panneau',
+          formula: `${vStringVocTmin.toFixed(1)} V < ${s.vsysMax} V`,
+          ok: vStringVocTmin < s.vsysMax },
+        { label: 'Strings/MPPT ≤ entrées disponibles/MPPT',
+          formula: `${Np} ≤ ${s.inputsPerMPPT} entrées/MPPT`,
+          ok: Np <= s.inputsPerMPPT },
+      ];
+
+      // ── DC Box (Étape 9) ──────────────────────────────────────
+      const stdFuses   = [10, 13, 16, 20, 25, 32, 40, 50, 63];
+      const stdDCVolt  = [600, 800, 1000, 1200, 1500];
+      const stdDCAmp   = [16, 20, 25, 32, 40, 50, 63, 80, 100, 125];
+
+      const dcFuseRaw  = 1.5 * s.isc;
+      const dcFuseStd  = stdFuses.find(v => v >= dcFuseRaw) || 63;
+      const dcFuseOk   = dcFuseStd <= s.fuseMax;
+
+      const dcSurgeUcpv   = vStringVocTmin * 1.2;
+      const dcSurgeStd    = stdDCVolt.find(v => v >= dcSurgeUcpv) || 1500;
+
+      const dcDiscoI      = Np * s.isc * 1.25;
+      const dcDiscoIStd   = stdDCAmp.find(v => v >= dcDiscoI) || 125;
+      const dcDiscoVStd   = stdDCVolt.find(v => v > vStringVocTmin) || 1500;
+
+      // Câble string→DC Box : Isc × 1.25 → section H1Z2Z2-K
+      const dcCableStringI = s.isc * 1.25;
+      const dcCableSizes   = [4, 6, 10, 16, 25, 35, 50];
+      const dcCableStringStd = dcCableSizes.find(sz => {
+        // ampacité approximative (H1Z2Z2-K pose libre) : 4→38A, 6→49A, 10→66A, 16→88A, 25→117A, 35→142A
+        const ampacity = {4:38, 6:49, 10:66, 16:88, 25:117, 35:142, 50:170};
+        return ampacity[sz] >= dcCableStringI;
+      }) || 50;
+
+      // Câble DC Box→onduleur : Isc_total × 1.25
+      const dcCableMainI   = Np * s.isc * 1.25;
+      const dcCableMainStd = dcCableSizes.find(sz => {
+        const ampacity = {4:38, 6:49, 10:66, 16:88, 25:117, 35:142, 50:170};
+        return ampacity[sz] >= dcCableMainI;
+      }) || 50;
+
+      // ── AC Box (Étape 10) ─────────────────────────────────────
+      const iAC = s.phaseType === 'tri'
+        ? (s.pacNominal * 1000) / (1.732 * 400)
+        : (s.pacNominal * 1000) / (230 * s.cosPhiAC);
+
+      const stdACBreaker = [16,20,25,32,40,50,63,80,100,125,160,200,250,315,400];
+      const acBreakerRaw = iAC * 1.25;
+      const acBreakerStd = stdACBreaker.find(v => v >= acBreakerRaw) || 400;
+
+      const acSurgeVoltage = s.phaseType === 'tri' ? 400 : 230;
+      const acRCDType      = 'Type B (composante DC)';
+      const acRCDmA        = 300;
+
+      // Câble AC : Iac × 1.25 → section cuivre
+      const acCableSizes = [
+        {s:6,iz:46},{s:10,iz:63},{s:16,iz:85},{s:25,iz:112},
+        {s:35,iz:138},{s:50,iz:168},{s:70,iz:213},{s:95,iz:258}
+      ];
+      const acCableStd = (acCableSizes.find(e => e.iz >= acBreakerRaw) || {s:95}).s;
+
+      return {
+        vocTmin, vocTmax, vmppTmin, vmppTmax, iscTmax, imppTmax,
+        nMax, nMin,
+        vStringVocTmin, vStringVocSTC, vStringVmppSTC, vStringVmppTmax,
+        iMpptImpp, iMpptIsc, iMpptImppTmax, iMpptIscTmax,
+        totalInputs, checks, allOk: checks.every(c => c.ok),
+        // DC Box
+        dcFuseRaw, dcFuseStd, dcFuseOk,
+        dcSurgeUcpv, dcSurgeStd,
+        dcDiscoI, dcDiscoIStd, dcDiscoVStd,
+        dcCableStringI, dcCableStringStd,
+        dcCableMainI, dcCableMainStd,
+        // AC Box
+        iAC, acBreakerRaw, acBreakerStd,
+        acSurgeVoltage, acRCDType, acRCDmA,
+        acCableStd,
+      };
+    }
+
+    // =========================================================
+    // SVG ICON COMPONENTS
+    // =========================================================
+    function Icon({ children, className = "w-5 h-5" }) {
+      return (
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+          className={className} fill="none" stroke="currentColor"
+          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          {children}
+        </svg>
+      );
+    }
+
+    function SunMedium({ className }) {
+      return (
+        <Icon className={className}>
+          <circle cx="12" cy="12" r="5"/>
+          <line x1="12" y1="1" x2="12" y2="3"/>
+          <line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/>
+          <line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </Icon>
+      );
+    }
+
+    function Sun({ className }) {
+      return (
+        <Icon className={className}>
+          <circle cx="12" cy="12" r="5"/>
+          <line x1="12" y1="1" x2="12" y2="3"/>
+          <line x1="12" y1="21" x2="12" y2="23"/>
+          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/>
+          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/>
+          <line x1="1" y1="12" x2="3" y2="12"/>
+          <line x1="21" y1="12" x2="23" y2="12"/>
+          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/>
+          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/>
+        </Icon>
+      );
+    }
+
+    function Trash2({ className }) {
+      return (
+        <Icon className={className}>
+          <polyline points="3 6 5 6 21 6"/>
+          <path d="M19 6l-1 14H6L5 6"/>
+          <path d="M10 11v6M14 11v6"/>
+          <path d="M9 6V4h6v2"/>
+        </Icon>
+      );
+    }
+
+    function Plus({ className }) {
+      return (
+        <Icon className={className}>
+          <line x1="12" y1="5" x2="12" y2="19"/>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+        </Icon>
+      );
+    }
+
+    function Zap({ className }) {
+      return (
+        <Icon className={className}>
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </Icon>
+      );
+    }
+
+    function SettingsIcon({ className }) {
+      return (
+        <Icon className={className}>
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </Icon>
+      );
+    }
+
+    function Battery({ className }) {
+      return (
+        <Icon className={className}>
+          <rect x="1" y="6" width="18" height="12" rx="2" ry="2"/>
+          <line x1="23" y1="13" x2="23" y2="11"/>
+        </Icon>
+      );
+    }
+
+    function LayoutGrid({ className }) {
+      return (
+        <Icon className={className}>
+          <rect x="3" y="3" width="7" height="7" rx="1"/>
+          <rect x="14" y="3" width="7" height="7" rx="1"/>
+          <rect x="3" y="14" width="7" height="7" rx="1"/>
+          <rect x="14" y="14" width="7" height="7" rx="1"/>
+        </Icon>
+      );
+    }
+
+    function Printer({ className }) {
+      return (
+        <Icon className={className}>
+          <polyline points="6 9 6 2 18 2 18 9"/>
+          <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/>
+          <rect x="6" y="14" width="12" height="8"/>
+        </Icon>
+      );
+    }
+
+    function Download({ className }) {
+      return (
+        <Icon className={className}>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="7 10 12 15 17 10"/>
+          <line x1="12" y1="15" x2="12" y2="3"/>
+        </Icon>
+      );
+    }
+
+    function Cpu({ className }) {
+      return (
+        <Icon className={className}>
+          <rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>
+          <rect x="9" y="9" width="6" height="6"/>
+          <line x1="9" y1="1" x2="9" y2="4"/>
+          <line x1="15" y1="1" x2="15" y2="4"/>
+          <line x1="9" y1="20" x2="9" y2="23"/>
+          <line x1="15" y1="20" x2="15" y2="23"/>
+          <line x1="20" y1="9" x2="23" y2="9"/>
+          <line x1="20" y1="14" x2="23" y2="14"/>
+          <line x1="1" y1="9" x2="4" y2="9"/>
+          <line x1="1" y1="14" x2="4" y2="14"/>
+        </Icon>
+      );
+    }
+
+    function Ruler({ className }) {
+      return (
+        <Icon className={className}>
+          <path d="M21.3 8.7l-3-3a1 1 0 0 0-1.4 0L2.7 19.3a1 1 0 0 0 0 1.4l3 3a1 1 0 0 0 1.4 0L21.3 10a1 1 0 0 0 0-1.3z"/>
+          <line x1="7.5" y1="21.5" x2="9.5" y2="19.5"/>
+          <line x1="11.5" y1="17.5" x2="13.5" y2="15.5"/>
+          <line x1="15.5" y1="13.5" x2="17.5" y2="11.5"/>
+        </Icon>
+      );
+    }
+
+    function XIcon({ className }) {
+      return (
+        <Icon className={className}>
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </Icon>
+      );
+    }
+
+    function ArrowRight({ className }) {
+      return (
+        <Icon className={className}>
+          <line x1="5" y1="12" x2="19" y2="12"/>
+          <polyline points="12 5 19 12 12 19"/>
+        </Icon>
+      );
+    }
+
+    function GitBranch({ className }) {
+      return (
+        <Icon className={className}>
+          <line x1="6" y1="3" x2="6" y2="15"/>
+          <circle cx="18" cy="6" r="3"/>
+          <circle cx="6" cy="18" r="3"/>
+          <path d="M18 9a9 9 0 0 1-9 9"/>
+        </Icon>
+      );
+    }
+
+    function Save({ className }) {
+      return (
+        <Icon className={className}>
+          <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+          <polyline points="17 21 17 13 7 13 7 21"/>
+          <polyline points="7 3 7 8 15 8"/>
+        </Icon>
+      );
+    }
+
+    function Upload({ className }) {
+      return (
+        <Icon className={className}>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/>
+          <line x1="12" y1="3" x2="12" y2="15"/>
+        </Icon>
+      );
+    }
+
+    function FolderOpen({ className }) {
+      return (
+        <Icon className={className}>
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+        </Icon>
+      );
+    }
+
+    // =========================================================
+    // COMPONENT: LoadInput
+    // =========================================================
+    function LoadInput({ loads, setLoads }) {
+      const addLoad = () => {
+        const newLoad = {
+          id: Math.random().toString(36).substr(2, 9),
+          name: 'Nouvel Appareil',
+          type: LoadType.AC,
+          power: 0,
+          hours: 0,
+          quantity: 1,
+        };
+        setLoads([...loads, newLoad]);
+      };
+
+      const updateLoad = (id, field, value) => {
+        setLoads(loads.map(load =>
+          load.id === id ? { ...load, [field]: value } : load
+        ));
+      };
+
+      const removeLoad = (id) => {
+        setLoads(loads.filter(load => load.id !== id));
+      };
+
+      return (
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 print:shadow-none print:border-gray-300 print:break-inside-avoid">
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2">
+              <Zap className="w-5 h-5 text-yellow-500" />
+              1. Consommation (Besoins)
+            </h2>
+            <button
+              onClick={addLoad}
+              className="flex items-center gap-1 text-sm bg-blue-600 text-white px-3 py-1.5 rounded-lg hover:bg-blue-700 transition-colors print:hidden"
+            >
+              <Plus className="w-4 h-4" /> Ajouter
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm text-left">
+              <thead className="text-xs text-gray-500 uppercase bg-gray-50 print:bg-gray-100">
+                <tr>
+                  <th className="px-4 py-3">Appareil</th>
+                  <th className="px-4 py-3 w-24">Type</th>
+                  <th className="px-4 py-3 w-24">Puissance (W)</th>
+                  <th className="px-4 py-3 w-24">Heures/j</th>
+                  <th className="px-4 py-3 w-20">Qté</th>
+                  <th className="px-4 py-3 w-10 print:hidden"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {loads.map((load) => (
+                  <tr key={load.id} className="border-b hover:bg-gray-50 print:border-gray-200">
+                    <td className="px-4 py-2">
+                      <input
+                        type="text"
+                        value={load.name}
+                        onChange={(e) => updateLoad(load.id, 'name', e.target.value)}
+                        className="w-full bg-transparent border-none focus:ring-0 text-black font-medium placeholder-gray-400 print:p-0"
+                        placeholder="Nom..."
+                      />
+                    </td>
+                    <td className="px-4 py-2">
+                      <select
+                        value={load.type}
+                        onChange={(e) => updateLoad(load.id, 'type', e.target.value)}
+                        className="bg-gray-50 border border-gray-300 text-black text-xs rounded focus:ring-blue-500 focus:border-blue-500 block w-full p-1 print:border-none print:bg-transparent print:appearance-none print:p-0"
+                      >
+                        <option value={LoadType.AC}>AC</option>
+                        <option value={LoadType.DC}>DC</option>
+                      </select>
+                    </td>
+                    <td className="px-4 py-2">
+                      <input
+                        type="number"
+                        min="0"
+                        value={load.power}
+                        onChange={(e) => updateLoad(load.id, 'power', parseFloat(e.target.value) || 0)}
+                        className="w-full bg-gray-50 border border-gray-300 rounded px-2 py-1 text-right text-black print:border-none print:bg-transparent print:p-0"
+                      />
+                    </td>
+                    <td className="px-4 py-2">
+                      <input
+                        type="number"
+                        min="0"
+                        max="24"
+                        value={load.hours}
+                        onChange={(e) => updateLoad(load.id, 'hours', parseFloat(e.target.value) || 0)}
+                        className="w-full bg-gray-50 border border-gray-300 rounded px-2 py-1 text-right text-black print:border-none print:bg-transparent print:p-0"
+                      />
+                    </td>
+                    <td className="px-4 py-2">
+                      <input
+                        type="number"
+                        min="1"
+                        value={load.quantity}
+                        onChange={(e) => updateLoad(load.id, 'quantity', parseInt(e.target.value) || 1)}
+                        className="w-full bg-gray-50 border border-gray-300 rounded px-2 py-1 text-right text-black print:border-none print:bg-transparent print:p-0"
+                      />
+                    </td>
+                    <td className="px-4 py-2 text-center print:hidden">
+                      <button
+                        onClick={() => removeLoad(load.id)}
+                        className="text-red-400 hover:text-red-600 transition-colors"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+                {loads.length === 0 && (
+                  <tr>
+                    <td colSpan={6} className="px-4 py-6 text-center text-gray-400 italic">
+                      Aucun appareil ajouté. Cliquez sur "Ajouter" pour commencer.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          {loads.length > 0 && (
+            <div className="mt-4 p-3 bg-blue-50 text-blue-800 text-sm rounded-lg flex justify-between print:bg-transparent print:border print:border-blue-100">
+              <span>Total Appareils: {loads.reduce((acc, l) => acc + l.quantity, 0)}</span>
+              <span>Conso. Brute (approx): {Math.round(loads.reduce((acc, l) => acc + (l.power * l.hours * l.quantity), 0))} Wh/j</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // =========================================================
+    // COMPONENT: SettingsInput
+    // =========================================================
+    function SettingsInput({ settings, setSettings }) {
+      const handleChange = (field, value) => {
+        setSettings(prev => ({
+          ...prev,
+          [field]: parseFloat(value) || 0
+        }));
+      };
+
+      const handleBatteryPreset = (e) => {
+        const idx = parseInt(e.target.value);
+        if (idx >= 0 && idx < BATTERY_PRESETS.length) {
+          const preset = BATTERY_PRESETS[idx];
+          setSettings(prev => ({
+            ...prev,
+            batteryVoltage: preset.voltage,
+            batteryCapacity: preset.capacity,
+            dischargeLimit: preset.discharge
+          }));
+        }
+      };
+
+      const singleBatteryKWh = (settings.batteryVoltage * settings.batteryCapacity) / 1000;
+
+      return (
+        <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 print:shadow-none print:border-gray-300 print:break-inside-avoid">
+          <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 mb-6">
+            <SettingsIcon className="w-5 h-5 text-gray-500" />
+            2. Paramètres du Site
+          </h2>
+
+          <div className="space-y-6">
+            {/* Environnement & Autonomie */}
+            <div>
+              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1">
+                <Sun className="w-3 h-3" /> Environnement & Autonomie
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Irradiation (Ens)
+                    <span className="block text-xs text-gray-400 font-normal">kWh/m²/j</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.irradiation}
+                    onChange={(e) => handleChange('irradiation', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Autonomie (N)
+                    <span className="block text-xs text-gray-400 font-normal">Jours</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.autonomyDays}
+                    onChange={(e) => handleChange('autonomyDays', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Facteur K (pertes système)
+                    <span className="block text-xs text-gray-400 font-normal">0.5 - 0.8 (défaut: 0.65)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    min="0.3"
+                    max="1"
+                    value={settings.kFactor}
+                    onChange={(e) => handleChange('kFactor', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Rendement Onduleur (η)
+                    <span className="block text-xs text-gray-400 font-normal">0.85 - 0.95 (défaut: 0.90)</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0.5"
+                    max="1"
+                    value={settings.inverterEfficiency}
+                    onChange={(e) => handleChange('inverterEfficiency', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Spécifications Batterie */}
+            <div>
+              <div className="flex justify-between items-center mb-3">
+                <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider flex items-center gap-1">
+                  <Battery className="w-3 h-3" /> Spécifications Batterie
+                </h3>
+                <span className="text-xs font-medium text-blue-600 bg-blue-50 px-2 py-0.5 rounded">
+                  Énergie Unitaire: {singleBatteryKWh.toFixed(2)} kWh
+                </span>
+              </div>
+
+              <div className="mb-3">
+                <select
+                  className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:hidden"
+                  onChange={handleBatteryPreset}
+                  defaultValue=""
+                >
+                  <option value="" disabled>-- Choisir une batterie standard --</option>
+                  {BATTERY_PRESETS.map((preset, idx) => (
+                    <option key={idx} value={idx}>{preset.label}</option>
+                  ))}
+                  <option value="-1">Personnalisé (Saisie Manuelle)</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Tension Unitaire
+                    <span className="block text-xs text-gray-400 font-normal">Volts (ex: 12)</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.batteryVoltage}
+                    onChange={(e) => handleChange('batteryVoltage', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Capacité Unitaire
+                    <span className="block text-xs text-gray-400 font-normal">Ah (ex: 200)</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.batteryCapacity}
+                    onChange={(e) => handleChange('batteryCapacity', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Décharge Max (D)
+                    <span className="block text-xs text-gray-400 font-normal">0.5-0.8 pour Plomb, 0.9 Lithium</span>
+                  </label>
+                  <input
+                    type="number"
+                    step="0.05"
+                    max="1"
+                    value={settings.dischargeLimit}
+                    onChange={(e) => handleChange('dischargeLimit', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Spécifications Panneaux */}
+            <div>
+              <h3 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1">
+                <LayoutGrid className="w-3 h-3" /> Spécifications Panneaux
+              </h3>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Puissance Crête
+                    <span className="block text-xs text-gray-400 font-normal">Wc (ex: 300)</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.panelPower}
+                    onChange={(e) => handleChange('panelPower', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Tension Nominale (Vmp)
+                    <span className="block text-xs text-gray-400 font-normal">Volts (ex: 30)</span>
+                  </label>
+                  <input
+                    type="number"
+                    value={settings.panelVoltage}
+                    onChange={(e) => handleChange('panelVoltage', e.target.value)}
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                  />
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================
+    // COMPONENT: ResultsDisplay
+    // =========================================================
+    function ResultsDisplay({ results, openCableTool }) {
+      const inverterLosses = results.energyAC - results.energyAC_raw;
+
+      const energyData = [
+        { name: 'DC (Direct)',     value: results.energyDC,      color: '#3B82F6' },
+        { name: 'AC (Appareils)',  value: results.energyAC_raw,  color: '#10B981' },
+        { name: 'Pertes Onduleur', value: inverterLosses,        color: '#F59E0B' },
+      ].filter(item => item.value > 0);
+
+      const handleDownloadPDF = () => {
+        const element = document.getElementById('report-container');
+        if (!element) return;
+        if (typeof window !== 'undefined' && window.html2pdf) {
+          const opt = {
+            margin: [10, 10],
+            filename: `rapport-solaire-${new Date().toISOString().split('T')[0]}.pdf`,
+            image: { type: 'jpeg', quality: 0.98 },
+            html2canvas: { scale: 2, useCORS: true, scrollY: 0 },
+            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+          };
+          window.html2pdf().set(opt).from(element).save();
+        } else {
+          alert("La librairie PDF n'est pas chargée. Essayez le bouton Imprimer.");
+        }
+      };
+
+      return (
+        <div className="space-y-6 print:break-inside-avoid">
+          <div className="bg-white p-6 rounded-xl shadow-lg border border-blue-100 print:shadow-none print:border-gray-300">
+            <div className="flex justify-between items-center mb-4 border-b pb-2">
+              <h2 className="text-xl font-bold text-gray-900">Rapport de Dimensionnement</h2>
+              <div className="flex gap-2 print:hidden">
+                <button
+                  onClick={handleDownloadPDF}
+                  className="p-2 text-green-600 hover:bg-green-50 rounded-full transition-colors"
+                  title="Télécharger le PDF"
+                >
+                  <Download className="w-5 h-5" />
+                </button>
+                <button
+                  onClick={() => window.print()}
+                  className="p-2 text-blue-600 hover:bg-blue-50 rounded-full transition-colors"
+                  title="Imprimer / Enregistrer en PDF"
+                >
+                  <Printer className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="hidden print:block text-sm text-gray-500 mb-4">
+              Généré le {new Date().toLocaleDateString()}
+            </div>
+
+            {/* Top Summary Stats */}
+            <div className="grid grid-cols-2 gap-4 mb-6">
+              <div className="bg-orange-50 p-4 rounded-lg print:bg-transparent print:border print:border-orange-200">
+                <span className="text-xs text-orange-600 font-bold uppercase">Consommation Journalière (Ej)</span>
+                <div className="text-2xl font-bold text-gray-900 mt-1">
+                  {Math.round(results.totalEnergyDaily).toLocaleString()} <span className="text-sm font-normal text-gray-500">Wh/j</span>
+                </div>
+                <div className="text-sm text-gray-700 font-medium mt-1">
+                  {(results.totalEnergyDaily / 1000).toFixed(2)} kWh/j
+                </div>
+              </div>
+              <div className="bg-blue-50 p-4 rounded-lg print:bg-transparent print:border print:border-blue-200">
+                <span className="text-xs text-blue-600 font-bold uppercase">Puissance Crête Requise (Pch)</span>
+                <div className="text-2xl font-bold text-gray-900 mt-1">
+                  {Math.round(results.peakPower).toLocaleString()} <span className="text-sm font-normal text-gray-500">Wc</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Sections détaillées */}
+            <div className="space-y-4">
+
+              {/* Générateur PV */}
+              <div className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
+                <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+                  <Sun className="w-4 h-4 text-orange-500" /> Générateur PV
+                </h3>
+                <div className="grid grid-cols-2 gap-y-2 text-sm">
+                  <span className="text-gray-500">Tension Système:</span>
+                  <span className="font-medium text-right text-gray-900">{results.systemVoltage} V</span>
+                  <span className="text-gray-500">Total Panneaux:</span>
+                  <span className="font-bold text-right text-gray-900">{results.totalPanels} panneaux</span>
+                  <span className="text-gray-500">Configuration:</span>
+                  <span className="font-medium text-right text-blue-600">
+                    {results.panelsParallel} chaînes de {results.panelsSeries} en série
+                  </span>
+                  {results.inverterPower > 0 && (() => {
+                    const ratio = results.peakPower / results.inverterPower;
+                    const optimal = ratio >= 1.2 && ratio <= 1.4;
+                    const ok = ratio >= 1.0 && ratio <= 1.5;
+                    return (
+                      <>
+                        <span className="text-gray-500">Ratio DC/AC:</span>
+                        <span className={`font-bold text-right ${optimal ? 'text-green-600' : ok ? 'text-orange-500' : 'text-red-600'}`}>
+                          {ratio.toFixed(2)} {optimal ? '✓ optimal' : ok ? '~ acceptable' : '✗ hors plage'}
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
+                <div className="mt-2 text-xs text-gray-400 bg-gray-50 p-1.5 rounded">
+                  Ratio DC/AC cible : 1.2 – 1.4 pour zones tropicales
+                </div>
+              </div>
+
+              {/* Parc Batterie */}
+              <div className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
+                <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+                  <Battery className="w-4 h-4 text-green-500" /> Parc Batterie
+                </h3>
+                <div className="grid grid-cols-2 gap-y-2 text-sm">
+                  <span className="text-gray-500">Capacité Ah:</span>
+                  <span className="font-medium text-right text-gray-900">{Math.round(results.batteryBankCapacity)} Ah</span>
+                  <span className="text-gray-500">Capacité Énergie:</span>
+                  <span className="font-medium text-right text-gray-900">{(results.batteryBankCapacityKWh).toFixed(1)} kWh</span>
+                  <span className="text-gray-500">Nombre total:</span>
+                  <span className="font-bold text-right text-gray-900">{results.totalBatteries} batteries</span>
+                  <span className="text-gray-500">Câblage:</span>
+                  <span className="font-medium text-right text-blue-600">
+                    {results.batteriesParallel} branches de {results.batteriesSeries} en série
+                  </span>
+                  {results.batteryBankCapacityKWh > 0 && results.inverterPower > 0 && (() => {
+                    const cRate = results.inverterPower / (results.batteryBankCapacityKWh * 1000);
+                    const cOk = cRate < 1;
+                    return (
+                      <>
+                        <span className="text-gray-500">C-rate décharge:</span>
+                        <span className={`font-bold text-right ${cOk ? 'text-green-600' : 'text-red-600'}`}>
+                          {cRate.toFixed(2)} C {cOk ? '✓' : '✗ > 1C'}
+                        </span>
+                      </>
+                    );
+                  })()}
+                </div>
+                {results.batteryBankCapacityKWh > 0 && results.inverterPower > 0 && (
+                  <div className="mt-2 text-xs text-gray-400 bg-gray-50 p-1.5 rounded">
+                    C-rate recommandé : &lt; 1C (idéalement &lt; 0.5C pour LiFePO4)
+                  </div>
+                )}
+              </div>
+
+              {/* Électronique */}
+              <div className="border border-gray-200 rounded-lg p-4 print:border-gray-300">
+                <h3 className="font-semibold text-gray-800 flex items-center gap-2 mb-3">
+                  <Cpu className="w-4 h-4 text-purple-500" /> Électronique
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  {/* Régulateur */}
+                  <div className="bg-purple-50 rounded-lg p-3 print:bg-transparent print:border print:border-purple-200">
+                    <div className="text-sm font-semibold text-purple-900 mb-2">Régulateur de Charge</div>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Type:</span>
+                        <span className="font-medium text-gray-900">MPPT</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Courant min:</span>
+                        <span className="font-bold text-gray-900">{Math.ceil(results.regulatorAmps)} A</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Tension:</span>
+                        <span className="font-medium text-gray-900">{results.systemVoltage} V</span>
+                      </div>
+                    </div>
+                  </div>
+                  {/* Onduleur */}
+                  <div className="bg-indigo-50 rounded-lg p-3 print:bg-transparent print:border print:border-indigo-200">
+                    <div className="text-sm font-semibold text-indigo-900 mb-2">Onduleur DC/AC</div>
+                    <div className="space-y-1 text-sm">
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Type:</span>
+                        <span className="font-medium text-gray-900">Pur Sinus</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Puissance min:</span>
+                        <span className="font-bold text-gray-900">{Math.ceil(results.inverterPower)} W</span>
+                      </div>
+                      <div className="flex justify-between">
+                        <span className="text-gray-600">Entrée:</span>
+                        <span className="font-medium text-gray-900">{results.systemVoltage} V</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Graphique Répartition */}
+              {energyData.length > 0 && (
+                <div className="mt-4 print:hidden">
+                  <h4 className="text-xs text-center text-gray-400 mb-2">Répartition Consommation (Wh)</h4>
+                  <div className="h-40 w-full flex items-center justify-center">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <PieChart>
+                        <Pie
+                          data={energyData}
+                          cx="50%"
+                          cy="50%"
+                          innerRadius={30}
+                          outerRadius={50}
+                          paddingAngle={5}
+                          dataKey="value"
+                        >
+                          {energyData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.color} />
+                          ))}
+                        </Pie>
+                        <Tooltip formatter={(value) => Math.round(value) + ' Wh'} />
+                      </PieChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <div className="flex flex-wrap justify-center gap-3 mt-2">
+                    {energyData.map((entry, index) => (
+                      <div key={index} className="flex items-center gap-1.5">
+                        <span className="w-3 h-3 rounded-full" style={{ backgroundColor: entry.color }}></span>
+                        <span className="text-xs text-gray-600">
+                          {entry.name}: <span className="font-medium text-gray-900">{Math.round(entry.value)} Wh</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Bouton Cable Tool */}
+              <button
+                onClick={openCableTool}
+                className="w-full mt-4 flex items-center justify-center gap-2 bg-gray-800 hover:bg-gray-900 text-white py-3 rounded-lg transition-all shadow-md print:hidden"
+              >
+                <Ruler className="w-4 h-4" />
+                Calculer les Sections de Câbles
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================
+    // COMPONENT: CableTool (Modal)
+    // =========================================================
+    function CableTool({ isOpen, onClose, results }) {
+      const [segments, setSegments] = useState([
+        { id: 'pv-reg',  label: 'Panneaux → Régulateur',  length: 10, current: 0 },
+        { id: 'reg-bat', label: 'Régulateur → Batteries',  length: 2,  current: 0 },
+        { id: 'bat-inv', label: 'Batteries → Onduleur',    length: 2,  current: 0 },
+        { id: 'inv-load',label: 'Onduleur → Tableau AC',   length: 10, current: 0 },
+      ]);
+
+      useEffect(() => {
+        const I_pv_reg  = results.peakPower    / results.systemVoltage;
+        const I_reg_bat = results.regulatorAmps;
+        const I_bat_inv = results.inverterPower / results.systemVoltage;
+        const I_inv_load= results.inverterPower / 230;
+
+        setSegments(prev => prev.map(s => {
+          let amps = 0;
+          if (s.id === 'pv-reg')   amps = I_pv_reg;
+          if (s.id === 'reg-bat')  amps = I_reg_bat;
+          if (s.id === 'bat-inv')  amps = I_bat_inv;
+          if (s.id === 'inv-load') amps = I_inv_load;
+          return { ...s, current: amps };
+        }));
+      }, [results]);
+
+      const updateLength = (id, len) => {
+        setSegments(prev => prev.map(s => s.id === id ? { ...s, length: len } : s));
+      };
+
+      if (!isOpen) return null;
+
+      const standardSizes = [1.5, 2.5, 4, 6, 10, 16, 25, 35, 50, 70, 95];
+
+      return (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b flex justify-between items-center sticky top-0 bg-white z-10">
+              <h2 className="text-xl font-bold text-gray-900">Dimensionnement des Câbles</h2>
+              <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-full">
+                <XIcon className="w-5 h-5 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              <div className="text-sm text-gray-600 bg-yellow-50 p-4 rounded-lg border border-yellow-100 space-y-1">
+                <div><strong>DC :</strong> S = 2 × L × ρ × I / ΔU — ΔU ≤ 1% — ρ = 0.0225 Ω·mm²/m (Cu 70°C)</div>
+                <div><strong>AC mono :</strong> S = 2 × L × ρ × I / ΔU — ΔU ≤ 2%</div>
+                <div><strong>AC triphasé :</strong> S = √3 × L × ρ × I / ΔU — ΔU ≤ 2%</div>
+                <div className="text-xs text-orange-600 font-medium mt-1">⚡ Câbles DC solaires : H1Z2Z2-K (double isolation, UV, 1500 V DC, 120°C)</div>
+              </div>
+
+              <div className="space-y-4">
+                {segments.map(segment => {
+                  const isDC = segment.id !== 'inv-load';
+                  const voltage = isDC ? results.systemVoltage : 230;
+                  const dropRate = isDC ? 0.01 : 0.02;
+                  const section = calculateCableSection(segment.length, segment.current, voltage, dropRate, false);
+                  const standardSizes = [1.5, 2.5, 4, 6, 10, 16, 25, 35, 50, 70, 95];
+                  const recommended = standardSizes.find(s => s >= section) || standardSizes[standardSizes.length - 1];
+                  // Vérification ampacité thermique H1Z2Z2-K pour DC
+                  const dcEntry = isDC ? DC_SOLAR_CABLE_TABLE.find(e => e.section >= recommended) : null;
+                  const thermalOk = isDC && dcEntry ? dcEntry.ampacity >= segment.current * 1.25 : true;
+                  const finalSection = isDC && dcEntry && !thermalOk
+                    ? (DC_SOLAR_CABLE_TABLE.find(e => e.ampacity >= segment.current * 1.25) || DC_SOLAR_CABLE_TABLE[DC_SOLAR_CABLE_TABLE.length-1]).section
+                    : recommended;
+
+                  return (
+                    <div key={segment.id} className="bg-gray-50 p-4 rounded-lg border border-gray-200">
+                      <div className="flex justify-between items-start mb-2">
+                        <div>
+                          <h3 className="font-semibold text-gray-800">{segment.label}</h3>
+                          <span className="text-xs text-gray-400">{isDC ? 'H1Z2Z2-K — ΔV ≤ 1%' : 'U-1000 R2V Cu — ΔV ≤ 2%'}</span>
+                        </div>
+                        <span className="text-xs bg-gray-200 px-2 py-1 rounded text-gray-600">
+                          {Math.round(segment.current)} A / {voltage} V
+                        </span>
+                      </div>
+                      <div className="flex items-end gap-4">
+                        <div className="flex-1">
+                          <label className="block text-xs font-medium text-gray-500 mb-1">Longueur (mètres)</label>
+                          <input
+                            type="number"
+                            value={segment.length}
+                            onChange={(e) => updateLength(segment.id, parseFloat(e.target.value) || 0)}
+                            className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-sm text-black"
+                          />
+                        </div>
+                        <div className="flex items-center pb-2 text-gray-400">
+                          <ArrowRight className="w-5 h-5" />
+                        </div>
+                        <div className="flex-1">
+                          <label className="block text-xs font-medium text-gray-500 mb-1">Section ΔV calculée</label>
+                          <div className="text-lg font-bold text-gray-900">
+                            {section.toFixed(2)} <span className="text-sm font-normal">mm²</span>
+                          </div>
+                        </div>
+                        <div className="flex-1 bg-green-50 p-2 rounded border border-green-100">
+                          <label className="block text-xs font-medium text-green-700 mb-1">
+                            Section retenue
+                            {isDC && !thermalOk && <span className="text-orange-600"> (thermique)</span>}
+                          </label>
+                          <div className="text-lg font-bold text-green-700">
+                            {finalSection} <span className="text-sm font-normal">mm²</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="p-6 border-t bg-gray-50 flex justify-end">
+              <button
+                onClick={onClose}
+                className="px-6 py-2 bg-gray-800 text-white rounded-lg hover:bg-gray-900 transition-colors"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================
+    // COMPONENT: StringDimensioning
+    // =========================================================
+    function StringDimensioning({ s, setS }) {
+      const h = (field, val) => setS(prev => ({ ...prev, [field]: parseFloat(val) || 0 }));
+      const res = calculateStringConfig(s);
+
+      function InputField({ label, unit, field, step, note }) {
+        return (
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              {label}
+              {unit && <span className="block text-xs text-gray-400 font-normal">{unit}</span>}
+              {note && <span className="block text-xs text-blue-400 font-normal">{note}</span>}
+            </label>
+            <input
+              type="number"
+              step={step || "any"}
+              value={s[field]}
+              onChange={e => h(field, e.target.value)}
+              className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-orange-500 focus:border-orange-500 text-black"
+            />
+          </div>
+        );
+      }
+
+      const nOk = s.nPanelsSeries >= res.nMin && s.nPanelsSeries <= res.nMax;
+      const npOk = s.nStringsParallel <= s.inputsPerMPPT;
+
+      const handleDownloadStringsPDF = () => {
+        const element = document.getElementById('strings-report');
+        if (!element) return;
+        if (typeof window !== 'undefined' && window.html2pdf) {
+          const opt = {
+            margin: [10, 10],
+            filename: `strings-paralleles-${new Date().toISOString().split('T')[0]}.pdf`,
+            image: { type: 'jpeg', quality: 0.98 },
+            html2canvas: { scale: 2, useCORS: true, scrollY: 0 },
+            jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+          };
+          window.html2pdf().set(opt).from(element).save();
+        } else {
+          alert("La librairie PDF n'est pas chargée.");
+        }
+      };
+
+      return (
+        <div id="strings-report" className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+
+          {/* === Barre d'actions PDF (pleine largeur) === */}
+          <div className="lg:col-span-12 print:hidden">
+            <div className="flex items-center justify-between bg-white px-5 py-3 rounded-xl shadow-sm border border-gray-100">
+              <div className="flex items-center gap-2">
+                <GitBranch className="w-4 h-4 text-orange-500" />
+                <span className="text-sm font-semibold text-gray-700">Rapport Strings & Parallèles</span>
+                <span className={`text-xs px-2 py-0.5 rounded font-medium ${res.allOk ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  {res.allOk ? '✓ Valide' : '✗ Invalide'}
+                </span>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleDownloadStringsPDF}
+                  className="flex items-center gap-1.5 text-sm bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors"
+                  title="Télécharger en PDF"
+                >
+                  <Download className="w-4 h-4" /> PDF
+                </button>
+                <button
+                  onClick={() => window.print()}
+                  className="flex items-center gap-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                  title="Imprimer"
+                >
+                  <Printer className="w-4 h-4" /> Imprimer
+                </button>
+              </div>
+            </div>
+          </div>
+
+          {/* === Colonne gauche : Saisies === */}
+          <div className="lg:col-span-7 space-y-6">
+
+            {/* Paramètres Panneau STC */}
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 mb-5">
+                <LayoutGrid className="w-5 h-5 text-orange-500" />
+                Paramètres du Panneau (STC — 25 °C)
+              </h2>
+              <div className="grid grid-cols-2 gap-4">
+                <InputField label="Voc — Tension circuit ouvert" unit="Volts (ex: 49.90)" field="voc" step="0.01" />
+                <InputField label="Vmpp — Tension au point max" unit="Volts (ex: 41.96)" field="vmpp" step="0.01" />
+                <InputField label="Isc — Courant court-circuit" unit="Ampères (ex: 13.98)" field="isc" step="0.01" />
+                <InputField label="Impp — Courant au point max" unit="Ampères (ex: 13.11)" field="impp" step="0.01" />
+                <InputField label="β — Coeff. temp. tension" unit="%/°C (ex: -0.272)" field="beta" step="0.001" note="Valeur négative (tension ↓ quand T ↑)" />
+                <InputField label="α — Coeff. temp. courant" unit="%/°C (ex: +0.044)" field="alpha" step="0.001" note="Valeur positive (courant ↑ quand T ↑)" />
+                <InputField label="Vsys max panneau" unit="V (ex: 1500)" field="vsysMax" step="1" />
+                <InputField label="Fusible max série (Isc_max)" unit="A (ex: 25)" field="fuseMax" step="1" />
+              </div>
+            </div>
+
+            {/* Paramètres Onduleur */}
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 mb-5">
+                <Cpu className="w-5 h-5 text-purple-500" />
+                Paramètres de l'Onduleur
+              </h2>
+              <div className="grid grid-cols-2 gap-4">
+                <InputField label="Vdc max onduleur" unit="V (ex: 1100)" field="vdcMax" step="1" />
+                <InputField label="V startup (démarrage)" unit="V (ex: 200)" field="vstartup" step="1" />
+                <InputField label="Plage MPPT min" unit="V (ex: 200)" field="vmpptMin" step="1" />
+                <InputField label="Plage MPPT max" unit="V (ex: 1000)" field="vmpptMax" step="1" />
+                <InputField label="Impp max par MPPT" unit="A (ex: 30)" field="imppMaxMPPT" step="1" />
+                <InputField label="Isc max par MPPT" unit="A (ex: 40)" field="iscMaxMPPT" step="1" />
+                <InputField label="Nombre de MPPT" unit="(ex: 6)" field="nMPPT" step="1" />
+                <InputField label="Entrées par MPPT" unit="(ex: 2)" field="inputsPerMPPT" step="1" />
+              </div>
+              <div className="mt-4 pt-4 border-t border-gray-100">
+                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Sortie AC de l'onduleur</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <InputField label="Puissance AC nominale" unit="kW (ex: 60)" field="pacNominal" step="0.5" />
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Type de réseau
+                      <span className="block text-xs text-gray-400 font-normal">Monophasé / Triphasé</span>
+                    </label>
+                    <select
+                      value={s.phaseType}
+                      onChange={e => setS(prev => ({ ...prev, phaseType: e.target.value }))}
+                      className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-orange-500 focus:border-orange-500 text-black"
+                    >
+                      <option value="tri">Triphasé 400 V</option>
+                      <option value="mono">Monophasé 230 V</option>
+                    </select>
+                  </div>
+                  {s.phaseType === 'mono' && (
+                    <InputField label="cos φ charge AC" unit="(ex: 0.90)" field="cosPhiAC" step="0.01" />
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Températures & Configuration */}
+            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
+              <h2 className="text-lg font-semibold text-gray-800 flex items-center gap-2 mb-5">
+                <GitBranch className="w-5 h-5 text-blue-500" />
+                Températures & Configuration Strings
+              </h2>
+              <div className="grid grid-cols-2 gap-4 mb-4">
+                <InputField label="T min cellule" unit="°C (ex: 15 pour CI)" field="tMinCell" step="1" note="Nuit froide / saison sèche" />
+                <InputField label="T max cellule" unit="°C (ex: 70 pour CI)" field="tMaxCell" step="1" note="Panneau en plein soleil" />
+              </div>
+              <div className="p-4 bg-orange-50 rounded-lg border border-orange-100">
+                <p className="text-xs font-bold text-orange-700 uppercase mb-3">Configuration à évaluer</p>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      N panneaux en série (par string)
+                      <span className={`block text-xs font-semibold mt-0.5 ${nOk ? 'text-green-600' : 'text-red-600'}`}>
+                        Plage admissible : {res.nMin} – {res.nMax} {nOk ? '✓' : '✗'}
+                      </span>
+                    </label>
+                    <input
+                      type="number" step="1" min="1"
+                      value={s.nPanelsSeries}
+                      onChange={e => h('nPanelsSeries', e.target.value)}
+                      className={`w-full border rounded-md px-3 py-2 text-sm font-bold text-black focus:outline-none ${nOk ? 'bg-green-50 border-green-400' : 'bg-red-50 border-red-400'}`}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      N strings en parallèle (par MPPT)
+                      <span className={`block text-xs font-semibold mt-0.5 ${npOk ? 'text-green-600' : 'text-red-600'}`}>
+                        Max : {s.inputsPerMPPT} entrées/MPPT {npOk ? '✓' : '✗'}
+                      </span>
+                    </label>
+                    <input
+                      type="number" step="1" min="1"
+                      value={s.nStringsParallel}
+                      onChange={e => h('nStringsParallel', e.target.value)}
+                      className={`w-full border rounded-md px-3 py-2 text-sm font-bold text-black focus:outline-none ${npOk ? 'bg-green-50 border-green-400' : 'bg-red-50 border-red-400'}`}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* === Colonne droite : Résultats === */}
+          <div className="lg:col-span-5">
+            <div className="sticky top-28 space-y-4">
+
+              {/* Statut global */}
+              <div className={`p-4 rounded-xl text-center font-bold text-base border-2 ${res.allOk ? 'bg-green-50 border-green-400 text-green-700' : 'bg-red-50 border-red-400 text-red-700'}`}>
+                {res.allOk ? '✓ Configuration VALIDE — Tous les critères sont respectés' : '✗ Configuration INVALIDE — Voir les points ci-dessous'}
+              </div>
+
+              {/* Plage admissible */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                <h3 className="font-semibold text-gray-800 mb-3 flex items-center gap-2 text-sm">
+                  <Ruler className="w-4 h-4 text-orange-500" /> Plage Admissible N panneaux/string
+                </h3>
+                <div className="flex items-center justify-center gap-4 py-2">
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-blue-600">{res.nMin}</div>
+                    <div className="text-xs text-gray-500 mt-1">N_min<br/><span className="font-mono">Vmpp(Tmax)</span></div>
+                  </div>
+                  <div className="text-gray-400 text-xl font-bold">≤ N ≤</div>
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-blue-600">{res.nMax}</div>
+                    <div className="text-xs text-gray-500 mt-1">N_max<br/><span className="font-mono">Voc(Tmin)</span></div>
+                  </div>
+                </div>
+                <div className="mt-3 text-xs text-gray-400 bg-gray-50 p-2 rounded font-mono space-y-0.5">
+                  <div>Nmin = ⌈{s.vmpptMin} / {res.vmppTmax.toFixed(3)}⌉ = {res.nMin}</div>
+                  <div>Nmax = ⌊{s.vdcMax} / {res.vocTmin.toFixed(3)}⌋ = {res.nMax}</div>
+                </div>
+              </div>
+
+              {/* Valeurs panneau corrigées */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm">Valeurs Panneau Corrigées en Température</h3>
+                <div className="grid grid-cols-2 gap-y-1.5 text-sm">
+                  <span className="text-gray-500">Voc(T={s.tMinCell}°C):</span>
+                  <span className="font-medium text-right text-red-600">{res.vocTmin.toFixed(3)} V</span>
+                  <span className="text-gray-500">Voc(T={s.tMaxCell}°C):</span>
+                  <span className="font-medium text-right text-gray-700">{res.vocTmax.toFixed(3)} V</span>
+                  <span className="text-gray-500">Vmpp(T={s.tMinCell}°C):</span>
+                  <span className="font-medium text-right text-gray-700">{res.vmppTmin.toFixed(3)} V</span>
+                  <span className="text-gray-500">Vmpp(T={s.tMaxCell}°C):</span>
+                  <span className="font-medium text-right text-orange-600">{res.vmppTmax.toFixed(3)} V</span>
+                  <span className="text-gray-500">Isc(T={s.tMaxCell}°C):</span>
+                  <span className="font-medium text-right text-gray-700">{res.iscTmax.toFixed(3)} A</span>
+                  <span className="text-gray-500">Impp(T={s.tMaxCell}°C):</span>
+                  <span className="font-medium text-right text-gray-700">{res.imppTmax.toFixed(3)} A</span>
+                </div>
+                <div className="mt-2 text-xs text-gray-400 bg-gray-50 p-2 rounded font-mono">
+                  V(T) = V_STC × [1 + β/100 × (T − 25)]
+                </div>
+              </div>
+
+              {/* Tensions string pour N choisi */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm">
+                  Tensions String — {s.nPanelsSeries} panneaux en série
+                </h3>
+                <div className="space-y-2 text-sm">
+                  <div className="flex justify-between items-center p-2 bg-red-50 rounded border border-red-100">
+                    <span className="text-red-700 font-medium">V_max abs. = Voc × N(Tmin) ← sécurité</span>
+                    <span className="font-bold text-red-700">{res.vStringVocTmin.toFixed(1)} V</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                    <span className="text-gray-600">V_Voc (STC, 25 °C)</span>
+                    <span className="font-semibold text-gray-800">{res.vStringVocSTC.toFixed(1)} V</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-blue-50 rounded border border-blue-100">
+                    <span className="text-blue-700 font-medium">V_Vmpp (STC, 25 °C) ← nominal MPPT</span>
+                    <span className="font-bold text-blue-700">{res.vStringVmppSTC.toFixed(1)} V</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-orange-50 rounded border border-orange-100">
+                    <span className="text-orange-700 font-medium">V_min Vmpp (Tmax) ← démarrage</span>
+                    <span className="font-bold text-orange-700">{res.vStringVmppTmax.toFixed(1)} V</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Courants par MPPT */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm">
+                  Courants par MPPT — {s.nStringsParallel} string(s) en parallèle
+                </h3>
+                <div className="grid grid-cols-2 gap-y-1.5 text-sm">
+                  <span className="text-gray-500">Impp (STC):</span>
+                  <span className={`font-bold text-right ${res.iMpptImpp < s.imppMaxMPPT ? 'text-green-600' : 'text-red-600'}`}>
+                    {res.iMpptImpp.toFixed(2)} A {res.iMpptImpp < s.imppMaxMPPT ? '✓' : '✗'}
+                  </span>
+                  <span className="text-gray-500">Isc (STC):</span>
+                  <span className={`font-bold text-right ${res.iMpptIsc < s.iscMaxMPPT ? 'text-green-600' : 'text-red-600'}`}>
+                    {res.iMpptIsc.toFixed(2)} A {res.iMpptIsc < s.iscMaxMPPT ? '✓' : '✗'}
+                  </span>
+                  <span className="text-gray-500">Impp (T={s.tMaxCell}°C):</span>
+                  <span className="font-medium text-right text-gray-700">{res.iMpptImppTmax.toFixed(2)} A</span>
+                  <span className="text-gray-500">Isc (T={s.tMaxCell}°C):</span>
+                  <span className="font-medium text-right text-gray-700">{res.iMpptIscTmax.toFixed(2)} A</span>
+                </div>
+                <div className="mt-2 text-xs text-gray-400 bg-gray-50 p-2 rounded">
+                  Limite Impp/MPPT : {s.imppMaxMPPT} A | Limite Isc/MPPT : {s.iscMaxMPPT} A
+                </div>
+              </div>
+
+              {/* Table de validation */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm">Table de Validation</h3>
+                <div className="space-y-1.5">
+                  {res.checks.map((check, i) => (
+                    <div key={i} className={`flex items-start gap-2 p-2 rounded text-xs ${check.ok ? 'bg-green-50' : 'bg-red-50'}`}>
+                      <span className={`flex-shrink-0 font-bold text-base leading-none mt-0.5 ${check.ok ? 'text-green-600' : 'text-red-600'}`}>
+                        {check.ok ? '✓' : '✗'}
+                      </span>
+                      <div>
+                        <div className={`font-semibold ${check.ok ? 'text-green-800' : 'text-red-800'}`}>{check.label}</div>
+                        <div className={`font-mono ${check.ok ? 'text-green-600' : 'text-red-600'}`}>{check.formula}</div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Capacité onduleur */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
+                <h3 className="font-semibold text-gray-800 mb-2 text-sm">Capacité Onduleur</h3>
+                <div className="grid grid-cols-2 gap-y-1.5 text-sm">
+                  <span className="text-gray-500">Entrées totales disponibles :</span>
+                  <span className="font-bold text-right text-gray-900">{res.totalInputs} strings max</span>
+                  <span className="text-gray-500">Entrées utilisées (×{s.nMPPT} MPPT) :</span>
+                  <span className="font-bold text-right text-gray-900">{s.nMPPT * s.nStringsParallel} strings</span>
+                  <span className="text-gray-500">Entrées libres :</span>
+                  <span className={`font-bold text-right ${res.totalInputs - s.nMPPT * s.nStringsParallel >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                    {res.totalInputs - s.nMPPT * s.nStringsParallel} entrée(s)
+                  </span>
+                </div>
+              </div>
+
+              {/* DC Box (Étape 9) */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-yellow-200">
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm flex items-center gap-2">
+                  <Zap className="w-4 h-4 text-yellow-500" /> DC Box — Étape 9
+                </h3>
+                <div className="space-y-2 text-xs">
+                  <div className={`flex justify-between items-center p-2 rounded ${res.dcFuseOk ? 'bg-green-50' : 'bg-red-50'}`}>
+                    <span className="text-gray-600">Fusible DC / string (1.5×Isc={res.dcFuseRaw.toFixed(1)}A)</span>
+                    <span className={`font-bold ${res.dcFuseOk ? 'text-green-700' : 'text-red-700'}`}>
+                      {res.dcFuseStd} A / {res.dcDiscoVStd} V DC {res.dcFuseOk ? '✓' : `✗ > ${s.fuseMax}A max`}
+                    </span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-blue-50 rounded">
+                    <span className="text-gray-600">Sectionneur DC (≥Voc string, ≥{res.dcDiscoI.toFixed(1)}A)</span>
+                    <span className="font-bold text-blue-700">{res.dcDiscoVStd} V / {res.dcDiscoIStd} A DC</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-orange-50 rounded">
+                    <span className="text-gray-600">Parafoudre T2 (Ucpv≥{res.dcSurgeUcpv.toFixed(0)}V, In≥20kA)</span>
+                    <span className="font-bold text-orange-700">{res.dcSurgeStd} V / 40 kA</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                    <span className="text-gray-600">Câble string→DC Box ({res.dcCableStringI.toFixed(1)} A) H1Z2Z2-K</span>
+                    <span className="font-bold text-gray-700">{res.dcCableStringStd} mm²</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                    <span className="text-gray-600">Câble DC Box→Onduleur ({res.dcCableMainI.toFixed(1)} A) H1Z2Z2-K</span>
+                    <span className="font-bold text-gray-700">{res.dcCableMainStd} mm²</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* AC Box (Étape 10) */}
+              <div className="bg-white p-5 rounded-xl shadow-sm border border-purple-200">
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-purple-500" /> AC Box — Étape 10
+                </h3>
+                <div className="mb-2 text-xs text-gray-500 bg-purple-50 p-2 rounded font-mono">
+                  I_AC = {s.pacNominal} kW / ({s.phaseType === 'tri' ? '√3 × 400V' : `230V × ${s.cosPhiAC}`}) = {res.iAC.toFixed(1)} A
+                </div>
+                <div className="space-y-2 text-xs">
+                  <div className="flex justify-between items-center p-2 bg-purple-50 rounded">
+                    <span className="text-gray-600">Disjoncteur AC (1.25×{res.iAC.toFixed(1)}={res.acBreakerRaw.toFixed(1)}A, courbe C)</span>
+                    <span className="font-bold text-purple-700">{res.acBreakerStd} A — {s.phaseType === 'tri' ? '4P' : '2P'}</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-pink-50 rounded">
+                    <span className="text-gray-600">DDR ({res.acRCDType})</span>
+                    <span className="font-bold text-pink-700">{res.acRCDmA} mA — {s.phaseType === 'tri' ? '4P' : '2P'}</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-orange-50 rounded">
+                    <span className="text-gray-600">Parafoudre T2 AC (Un={res.acSurgeVoltage}V, In≥20kA)</span>
+                    <span className="font-bold text-orange-700">{res.acSurgeVoltage} V / 40 kA</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                    <span className="text-gray-600">Câble AC onduleur→AC Box / TGBT</span>
+                    <span className="font-bold text-gray-700">{res.acCableStd} mm² Cu {s.phaseType === 'tri' ? '4G' : '3G'}{res.acCableStd}</span>
+                  </div>
+                  <div className="flex justify-between items-center p-2 bg-gray-50 rounded">
+                    <span className="text-gray-600">Compteur énergie bidirectionnel</span>
+                    <span className="font-bold text-gray-700">Classe 1 — {s.phaseType === 'tri' ? '3 phases' : '1 phase'}</span>
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // =========================================================
+    // COMPONENT: App (Main)
+    // =========================================================
+    function App() {
+      const [loads, setLoads] = useState([
+        { id: '1', name: 'Lampes LED',    type: LoadType.AC, power: 10,  hours: 6,  quantity: 5 },
+        { id: '2', name: 'Téléviseur',    type: LoadType.AC, power: 80,  hours: 4,  quantity: 1 },
+        { id: '3', name: 'Réfrigérateur', type: LoadType.AC, power: 150, hours: 12, quantity: 1 },
+      ]);
+
+      const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+
+      const [results, setResults] = useState({
+        totalEnergyDaily: 0,
+        energyAC: 0,
+        energyAC_raw: 0,
+        energyDC: 0,
+        peakPower: 0,
+        systemVoltage: 12,
+        totalPanels: 0,
+        panelsSeries: 0,
+        panelsParallel: 0,
+        batteryBankCapacity: 0,
+        batteryBankCapacityKWh: 0,
+        totalBatteries: 0,
+        batteriesSeries: 0,
+        batteriesParallel: 0,
+        regulatorAmps: 0,
+        inverterPower: 0,
+      });
+
+      const [isCableToolOpen, setIsCableToolOpen] = useState(false);
+      const [activeTab, setActiveTab] = useState('dimensionnement');
+      const [stringSettings, setStringSettings] = useState(DEFAULT_STRING_SETTINGS);
+      const [projectName, setProjectName] = useState('Nouveau Projet');
+
+      useEffect(() => {
+        const calc = calculateSolarSystem(loads, settings);
+        setResults(calc);
+      }, [loads, settings]);
+
+      // ── Sauvegarde projet ──────────────────────────────────────
+      const handleSaveProject = () => {
+        const project = {
+          version: '1.0',
+          projectName,
+          savedAt: new Date().toISOString(),
+          loads,
+          settings,
+          stringSettings,
+        };
+        const blob = new Blob([JSON.stringify(project, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${projectName.replace(/[^a-z0-9]/gi, '_')}_${new Date().toISOString().split('T')[0]}.sdp`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      };
+
+      // ── Chargement projet ─────────────────────────────────────
+      const handleLoadProject = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          try {
+            const project = JSON.parse(evt.target.result);
+            if (project.projectName) setProjectName(project.projectName);
+            if (Array.isArray(project.loads)) setLoads(project.loads);
+            if (project.settings)       setSettings(prev => ({ ...prev, ...project.settings }));
+            if (project.stringSettings) setStringSettings(prev => ({ ...prev, ...project.stringSettings }));
+          } catch {
+            alert('Fichier invalide. Veuillez sélectionner un fichier .sdp valide.');
+          }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+      };
+
+      return (
+        <div className="min-h-screen bg-gray-50 pb-20 print:bg-white print:pb-0">
+          {/* Header */}
+          <header className="bg-white border-b border-gray-200 sticky top-0 z-30 print:static print:border-none print:shadow-none">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center gap-3">
+              <SunMedium className="w-8 h-8 text-orange-500 flex-shrink-0" />
+              <h1 className="text-xl font-bold text-gray-900 tracking-tight flex-shrink-0">
+                Solar<span className="text-orange-500">Dimension</span>
+              </h1>
+              <span className="text-xs text-gray-400 bg-gray-100 px-2 py-0.5 rounded flex-shrink-0 hidden sm:inline print:inline">
+                Dimensionnement PV
+              </span>
+
+              {/* Spacer */}
+              <div className="flex-1" />
+
+              {/* Contrôles projet */}
+              <div className="flex items-center gap-2 print:hidden">
+                <input
+                  type="text"
+                  value={projectName}
+                  onChange={e => setProjectName(e.target.value)}
+                  className="hidden md:block text-sm border border-gray-300 rounded-lg px-3 py-1.5 w-44 text-gray-700 focus:ring-orange-500 focus:border-orange-500"
+                  placeholder="Nom du projet..."
+                />
+                <button
+                  onClick={handleSaveProject}
+                  title="Sauvegarder le projet (.sdp)"
+                  className="flex items-center gap-1.5 text-sm bg-orange-500 hover:bg-orange-600 text-white px-3 py-1.5 rounded-lg transition-colors font-medium"
+                >
+                  <Save className="w-4 h-4" />
+                  <span className="hidden sm:inline">Sauvegarder</span>
+                </button>
+                <label
+                  title="Charger un projet (.sdp)"
+                  className="flex items-center gap-1.5 text-sm bg-gray-700 hover:bg-gray-800 text-white px-3 py-1.5 rounded-lg transition-colors font-medium cursor-pointer"
+                >
+                  <FolderOpen className="w-4 h-4" />
+                  <span className="hidden sm:inline">Charger</span>
+                  <input
+                    type="file"
+                    accept=".sdp,.json"
+                    onChange={handleLoadProject}
+                    className="hidden"
+                  />
+                </label>
+              </div>
+            </div>
+          </header>
+
+          {/* Navigation par onglets */}
+          <div className="bg-white border-b border-gray-200 sticky top-16 z-20 print:hidden">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+              <nav className="flex">
+                <button
+                  onClick={() => setActiveTab('dimensionnement')}
+                  className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-colors ${activeTab === 'dimensionnement' ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+                >
+                  <Zap className="w-4 h-4" /> Dimensionnement Autonome
+                </button>
+                <button
+                  onClick={() => setActiveTab('strings')}
+                  className={`flex items-center gap-2 px-5 py-3.5 text-sm font-medium border-b-2 transition-colors ${activeTab === 'strings' ? 'border-orange-500 text-orange-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}`}
+                >
+                  <GitBranch className="w-4 h-4" /> Strings & Parallèles
+                </button>
+              </nav>
+            </div>
+          </div>
+
+          <main id="report-container" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 print:py-4 print:px-0">
+            {activeTab === 'dimensionnement' ? (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 print:block">
+                {/* Barre d'actions PDF */}
+                <div className="lg:col-span-12 print:hidden">
+                  <div className="flex items-center justify-between bg-white px-5 py-3 rounded-xl shadow-sm border border-gray-100">
+                    <div className="flex items-center gap-2">
+                      <Zap className="w-4 h-4 text-orange-500" />
+                      <span className="text-sm font-semibold text-gray-700">Rapport de Dimensionnement Autonome</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => {
+                          const el = document.getElementById('report-container');
+                          if (el && window.html2pdf) {
+                            window.html2pdf().set({
+                              margin: [10, 10],
+                              filename: `rapport-solaire-${new Date().toISOString().split('T')[0]}.pdf`,
+                              image: { type: 'jpeg', quality: 0.98 },
+                              html2canvas: { scale: 2, useCORS: true, scrollY: 0 },
+                              jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+                            }).from(el).save();
+                          } else {
+                            alert("La librairie PDF n'est pas chargée.");
+                          }
+                        }}
+                        className="flex items-center gap-1.5 text-sm bg-green-600 hover:bg-green-700 text-white px-4 py-2 rounded-lg transition-colors"
+                        title="Télécharger en PDF"
+                      >
+                        <Download className="w-4 h-4" /> PDF
+                      </button>
+                      <button
+                        onClick={() => window.print()}
+                        className="flex items-center gap-1.5 text-sm bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg transition-colors"
+                        title="Imprimer"
+                      >
+                        <Printer className="w-4 h-4" /> Imprimer
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                {/* Colonne gauche: Saisies */}
+                <div className="lg:col-span-7 space-y-6 print:space-y-4">
+                  <div className="bg-blue-600 text-white p-4 rounded-lg shadow-sm mb-6 print:hidden">
+                    <h2 className="font-semibold text-lg">Instructions</h2>
+                    <p className="text-blue-100 text-sm mt-1">
+                      Remplissez la liste des appareils et configurez les paramètres de votre site.
+                      Le dimensionnement se met à jour automatiquement sur la droite.
+                    </p>
+                  </div>
+                  <LoadInput loads={loads} setLoads={setLoads} />
+                  <SettingsInput settings={settings} setSettings={setSettings} />
+                </div>
+                {/* Colonne droite: Résultats */}
+                <div className="lg:col-span-5 print:mt-8 print:break-before-page">
+                  <div className="sticky top-32 print:static">
+                    <ResultsDisplay
+                      results={results}
+                      openCableTool={() => setIsCableToolOpen(true)}
+                    />
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <StringDimensioning s={stringSettings} setS={setStringSettings} />
+            )}
+          </main>
+
+          {/* Modal Câbles */}
+          <CableTool
+            isOpen={isCableToolOpen}
+            onClose={() => setIsCableToolOpen(false)}
+            results={results}
+          />
+        </div>
+      );
+    }
+
+    // =========================================================
+    // MOUNT
+    // =========================================================
+    const rootElement = document.getElementById('root');
+    const root = ReactDOM.createRoot(rootElement);
+    root.render(
+      <React.StrictMode>
+        <App />
+      </React.StrictMode>
+    );
+  </script>
+</body>
+</html>

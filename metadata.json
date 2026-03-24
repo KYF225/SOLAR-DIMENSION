@@ -1,0 +1,5 @@
+{
+  "name": "SolarDimension",
+  "description": "Logiciel de dimensionnement de systèmes photovoltaïques autonomes complet, du bilan énergétique au câblage.",
+  "requestFramePermissions": []
+}
