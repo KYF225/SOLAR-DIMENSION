@@ -56,7 +56,7 @@
 
   <script type="text/babel">
     const { useState, useEffect, useRef } = React;
-    const { PieChart, Pie, Cell, ResponsiveContainer, Tooltip,
+    const { PieChart, Pie, Cell, ResponsiveContainer, Tooltip: RechartTooltip,
             BarChart, Bar, XAxis, YAxis, ReferenceLine, CartesianGrid } = Recharts;
 
     // =========================================================
@@ -774,6 +774,183 @@
     }
 
     // =========================================================
+    // DICTIONNAIRE DES INFOBULLES
+    // =========================================================
+    const TIPS = {
+      // ── Tableau de charges ──────────────────────────────────
+      appareil:    "Nom de l'équipement électrique (lampe, frigo, TV…). Utilisez un libellé clair pour retrouver chaque ligne facilement.",
+      type_courant:"AC (courant alternatif) : alimenté via l'onduleur — 230 V ou 400 V.\nDC (courant continu) : branché directement sur les batteries ou le régulateur.",
+      puissance_w: "Puissance nominale en Watts indiquée sur la plaque signalétique ou dans la fiche technique de l'appareil. Valeur à lire en mode de fonctionnement normal.",
+      quantite_n:  "Nombre d'unités identiques de cet appareil dans l'installation. La puissance et l'énergie seront multipliées par cette valeur.",
+      ku:          "Facteur d'utilisation : rapport entre la puissance réellement consommée et la puissance nominale.\n• Réfrigérateur : ~0.75 (cycles on/off du compresseur)\n• Lampe LED : ~0.90\n• Appareil toujours ON à pleine charge : 1.00",
+      whj:         "Énergie consommée par cet appareil en 24 h.\nFormule : P × Ku × heures_actives × N\nSert de base au bilan énergétique journalier.",
+      plage_usage: "Plage horaire d'utilisation sur 24 h. Cliquez sur les cases pour activer/désactiver chaque heure.\n🟠 Orange = heure solaire (6h–18h)\n🔵 Bleu = heure nuit",
+      // ── Paramètres site ─────────────────────────────────────
+      irradiation: "Rayonnement solaire global journalier moyen (kWh/m²/j).\nDépend de la localisation :\n• Abidjan ≈ 5.0–5.5\n• Bamako / Ouaga ≈ 5.5–6.0\n• Paris ≈ 3.0–3.5\nSource recommandée : NASA SSE ou atlas solaire national.",
+      autonomie:   "Nombre de jours consécutifs sans ensoleillement que les batteries doivent couvrir seules.\nEn zone tropicale :\n• Saison sèche : 1–2 jours\n• Saison des pluies : 2–3 jours",
+      kFactor:     "Coefficient global de pertes système. Tient compte :\n• Pertes en câbles (~3–5 %)\n• Échauffement des panneaux en climat chaud\n• Salissures et vieillissement\nValeur typique sous climat tropical : 0.60–0.70",
+      inverterEff: "Rendement de conversion DC→AC de l'onduleur.\nUn onduleur moderne affiche 90–95 %.\nCe facteur divise l'énergie AC requise pour obtenir l'énergie DC nécessaire depuis les batteries.",
+      ks:          "Facteur de simultanéité : probabilité que tous les appareils soient allumés en même temps.\n• Ks = 1.00 → tous actifs simultanément (cas défavorable)\n• Ks = 0.80 → 80 % des charges actives en même temps\nRéduit la puissance de pointe estimée.",
+      ke:          "Facteur d'extension : réserve de capacité pour anticiper une augmentation future de la consommation.\n• Ke = 1.00 → pas de marge\n• Ke = 1.10 → 10 % de réserve pour extensions futures\n• Ke = 1.20 → 20 % (recommandé pour installations industrielles)",
+      batVoltage:  "Tension nominale d'une batterie unitaire.\nArchitectures courantes :\n• 12 V → petits systèmes ≤ 1 kW\n• 24 V → résidentiel\n• 48 V → installations ≥ 3 kW\nUne tension plus élevée réduit le courant et permet des câbles plus fins.",
+      batCapacity: "Capacité de stockage d'une batterie unitaire en Ampère-heures.\nÉnergie unitaire = V × Ah / 1000\nEx : 12 V × 200 Ah = 2.4 kWh par batterie.",
+      discharge:   "Profondeur de décharge maximale autorisée.\n• Plomb-acide (AGM/Gel) : 50–80 % max\n• Lithium LiFePO4 : jusqu'à 90 %\nDépasser cette limite réduit significativement la durée de vie des batteries.",
+      panelPower:  "Puissance crête du panneau en Wc, mesurée en conditions STC :\nirradiance 1 000 W/m² · température cellule 25 °C · masse d'air AM 1.5\nIndiquée sur l'étiquette du module.",
+      panelVoltage:"Tension au point de puissance maximale (Vmpp) en conditions STC.\nSert à calculer le nombre de panneaux en série pour respecter la plage MPPT de l'onduleur.",
+      // ── KPIs résultats ──────────────────────────────────────
+      ej:          "Énergie Journalière totale (Ej) après application des facteurs Ku, Ks et Ke.\nC'est l'énergie que le système solaire doit produire chaque jour pour couvrir la consommation.",
+      pch:         "Puissance Crête requise (Pch) des panneaux PV.\nFormule : Pch = Ej / (Ens × K)\nPlus l'irradiation est élevée et le facteur K bon, moins de panneaux sont nécessaires.",
+      nPanels:     "Nombre de panneaux calculé = Pch / Puissance_unitaire, arrondi au supérieur.",
+      nBatteries:  "Nombre de batteries calculé pour stocker l'énergie requise pendant N jours d'autonomie, en respectant la limite de décharge maximale.",
+      regulateur:  "Régulateur MPPT : optimise et convertit la puissance DC des panneaux vers les batteries.\nDimensionné sur le courant Isc × 1.25 par string.",
+      onduleur:    "Onduleur : convertit le DC des batteries en AC 230/400 V pour les charges.\nDimensionné sur la puissance crête AC des charges (× Ke).",
+      // ── Strings & Parallèles — Panneau STC ─────────────────
+      voc:         "Tension en Circuit Ouvert (Voc) en conditions STC (1 000 W/m², 25 °C).\nTension maximale que le panneau produit à vide. Varie beaucoup avec la température : elle augmente par temps froid → contrainte de sécurité pour l'onduleur.",
+      vmpp:        "Tension au Point de Puissance Maximum (Vmpp) en conditions STC.\nTension de travail optimale du panneau. Le régulateur MPPT maintient le point de fonctionnement autour de cette valeur pour maximiser la production.",
+      isc:         "Courant de Court-Circuit (Isc) en conditions STC.\nCourant maximal produit quand les bornes sont en court-circuit. Sert à dimensionner les fusibles DC : calibre ≥ 1.5 × Isc.",
+      impp:        "Courant au Point de Puissance Maximum (Impp) en conditions STC.\nCourant de travail nominal : Impp × Vmpp = Puissance crête (Wc). Sert à vérifier la limite Impp/MPPT de l'onduleur.",
+      betaCoeff:   "Coefficient de température de tension (β), en %/°C. Toujours négatif : la tension diminue quand la température monte.\nEx : β = -0.272 %/°C → de 25°C à 70°C, Voc chute d'environ 12 %.",
+      alphaCoeff:  "Coefficient de température du courant (α), en %/°C. Légèrement positif.\nEx : α = +0.044 %/°C → l'augmentation du courant avec la chaleur est négligeable (< 2 % entre 25°C et 70°C).",
+      vsysMax:     "Tension d'isolement maximale du panneau (indiquée sur l'étiquette).\nLa tension string Voc(Tmin) × N ne doit JAMAIS dépasser cette valeur — risque de claquage de l'isolation du câble ou du module.",
+      fuseMax:     "Calibre maximal du fusible de protection par string, donné par le fabricant.\nEn général = 2 × Isc. Protège contre les courants de retour des strings en parallèle lors d'un défaut.",
+      // ── Strings & Parallèles — Onduleur ─────────────────────
+      vdcMax:      "Tension DC maximale admissible en entrée de l'onduleur.\nContrainte absolue : Voc(Tmin) × N < Vdc_max. Dépasser cette valeur même un instant peut détruire l'onduleur de manière irréversible.",
+      vstartup:    "Tension minimale de démarrage de l'MPPT.\nL'onduleur commence à produire quand la tension string atteint ce seuil. Condition : Vstartup ≤ Vmpp(Tmax) × N pour garantir le démarrage en forte chaleur.",
+      vmpptMin:    "Borne inférieure de la plage MPPT de l'onduleur.\nSi Vmpp(Tmax) × N descend sous cette valeur, l'MPPT ne peut plus optimiser le point de fonctionnement.",
+      vmpptMax:    "Borne supérieure de la plage MPPT de l'onduleur.\nContrainte de conception : Vmpp(STC) × N doit rester dans cette plage pour un rendement maximal.",
+      imppMaxMPPT: "Courant Impp maximal accepté par chaque entrée MPPT.\nContrainte : Impp_panneau × N_strings_parallèle ≤ Impp_max/MPPT. Protège les convertisseurs MPPT.",
+      iscMaxMPPT:  "Courant de court-circuit maximal par entrée MPPT.\nContrainte : Isc_panneau × N_strings_parallèle ≤ Isc_max/MPPT.",
+      nMPPT:       "Nombre de trackers MPPT indépendants de l'onduleur.\nChaque MPPT peut gérer des strings d'orientation différente (Est/Ouest, inclinaisons). Permet d'optimiser chaque sous-champ indépendamment.",
+      inputsPerMPPT:"Nombre de connecteurs d'entrée physiques (MC4) disponibles par MPPT.\nDéfinit le nombre maximum de strings en parallèle par MPPT sans boîte de jonction externe.",
+      pacNominal:  "Puissance AC nominale de l'onduleur côté réseau, en kW.\nSert à calculer le courant AC pour dimensionner le disjoncteur et les câbles de sortie (AC Box / TGBT).",
+      phaseType:   "Type de réseau électrique AC :\n• Triphasé 400 V (3P+N) : installations industrielles ou puissances > 6 kW\n• Monophasé 230 V (1P+N) : installations résidentielles",
+      cosPhiAC:    "Facteur de puissance (cos φ) des charges AC. Rapport entre puissance active (W) et puissance apparente (VA).\n• Charges résistives (éclairage, chauffe-eau) : cos φ ≈ 1.00\n• Moteurs, clim, pompes : cos φ ≈ 0.80–0.90",
+      // ── Strings & Parallèles — Températures & config ────────
+      tMinCell:    "Température minimale de la cellule PV en service.\nUtilisée pour calculer Voc(Tmin) = tension maximale du string → contrainte critique pour l'onduleur.\nEn Côte d'Ivoire : 15–20 °C (nuit fraîche en saison sèche).",
+      tMaxCell:    "Température maximale de la cellule PV en service.\nUtilisée pour calculer Vmpp(Tmax) = tension minimale de travail → détermine Nmin et la capacité de démarrage.\nEn Côte d'Ivoire : 65–75 °C (panneau en plein soleil, après-midi).",
+      nSeries:     "Nombre de panneaux connectés en série dans un string. Additionne les tensions.\nVstring = Vmpp × N. Doit respecter : Nmin ≤ N ≤ Nmax (calculé automatiquement ci-dessus).",
+      nParallel:   "Nombre de strings connectés en parallèle sur un même MPPT. Additionne les courants.\nImpact : Isc_total = Isc_panneau × N. Limité par Isc_max/MPPT de l'onduleur.",
+      // ── Strings & Parallèles — Résultats ────────────────────
+      nMinRes:     "N_min = ⌈V_mppt_min / Vmpp(Tmax)⌉\nNombre minimal de panneaux pour que le string reste dans la plage MPPT même à la température maximale de la cellule.",
+      nMaxRes:     "N_max = ⌊Vdc_max / Voc(Tmin)⌋\nNombre maximal de panneaux pour ne pas dépasser la tension d'entrée de l'onduleur à la température minimale (tension Voc la plus haute).",
+      vTempCorr:   "Tensions corrigées selon la loi : V(T) = V_STC × [1 + β/100 × (T − 25)]\n• Rouge Voc(Tmin) → contrainte critique : ne pas dépasser Vdc_max\n• Orange Vmpp(Tmax) → détermine Nmin et le démarrage",
+      vStringRes:  "Tensions du string complet (N panneaux en série).\n• V_max abs. = Voc(Tmin)×N → doit être < Vdc_max onduleur\n• V_Vmpp STC = Vmpp×N → tension nominale de travail MPPT\n• V_min Vmpp(Tmax) = Vmpp(Tmax)×N → tension minimum → démarrage",
+      iMpptRes:    "Courants cumulés sur un MPPT pour N_parallel strings en parallèle.\n• Impp < Impp_max/MPPT ✓\n• Isc < Isc_max/MPPT ✓\nCes limites protègent les convertisseurs MPPT de la surcharge en courant.",
+      dcBoxRes:    "DC Box (boîte de jonction côté courant continu) :\n• Fusibles/string : protection contre courants de retour entre strings\n• Sectionneur DC : isolation galvanique pour maintenance en sécurité\n• Parafoudre T2 DC : protection contre surtensions foudre (NFC 15-100)",
+      acBoxRes:    "AC Box / TGBT PV (tableau côté courant alternatif) :\n• Disjoncteur courbe C : protection magnéto-thermique des câbles\n• DDR type A ou B : protection différentielle des personnes\n• Parafoudre T2 AC : protection surtensions réseau",
+      // ── Câblage ─────────────────────────────────────────────
+      segI:        "Courant de dimensionnement du tronçon, calculé depuis la puissance des équipements et la tension du circuit.",
+      segL:        "Longueur du câble en mètres (aller simple). La chute de tension utilise le trajet aller-retour (×2 pour DC/AC monophasé, ×√3 pour AC triphasé).",
+      segSDV:      "Section minimale calculée par la contrainte de chute de tension selon NFC 15-100. La section normalisée immédiatement supérieure est retenue.",
+      segSTherm:   "Section minimale imposée par le courant thermique admissible, avec coefficient de sécurité ×1.25 et déclassement K selon le mode de pose.",
+      segSPhase:   "Section de phase retenue = max(S_ΔV, S_thermique). C'est la section minimale à commander chez le fournisseur de câbles.",
+      segPE:       "Conducteur de Protection (masse/terre), selon IEC 60364-5-54 :\n• S ≤ 16 mm² → PE = S\n• S ≤ 35 mm² → PE = 16 mm²\n• S > 35 mm² → PE = S/2",
+      segAmp:      "Ampacité du câble déclassée par le coefficient K (mode de pose). Doit être ≥ I × 1.25 pour valider la contrainte thermique NFC 15-100.",
+      segDV:       "Chute de tension réelle sur ce tronçon, en % de la tension nominale.\nLimites NFC 15-100 :\n• DC (PV→Batt) ≤ 1 % par tronçon\n• AC (Ond→Charges) ≤ 2 %\n• Total cascade ≤ 8 %",
+    };
+
+    // =========================================================
+    // COMPOSANT : HoverTip — infobulle avec délai 2 secondes
+    // =========================================================
+    function HoverTip({ tip, children, className = '', as: Tag = 'span' }) {
+      const [visible, setVisible] = useState(false);
+      const [coords, setCoords]   = useState({ x: 0, y: 0 });
+      const timerRef = useRef(null);
+
+      if (!tip) return <Tag className={className}>{children}</Tag>;
+
+      const handleEnter = (e) => {
+        const r = e.currentTarget.getBoundingClientRect();
+        // Positionner sous le centre de l'élément, en restant dans la fenêtre
+        const x = Math.min(Math.max(r.left + r.width / 2, 160), window.innerWidth - 160);
+        const y = r.bottom + 10;
+        setCoords({ x, y });
+        timerRef.current = setTimeout(() => setVisible(true), 2000);
+      };
+      const handleLeave = () => {
+        clearTimeout(timerRef.current);
+        setVisible(false);
+      };
+
+      return (
+        <Tag
+          className={`cursor-help ${className}`}
+          onMouseEnter={handleEnter}
+          onMouseLeave={handleLeave}
+        >
+          {children}
+          {visible && ReactDOM.createPortal(
+            <div
+              role="tooltip"
+              style={{
+                position: 'fixed',
+                left: coords.x,
+                top: coords.y,
+                transform: 'translateX(-50%)',
+                zIndex: 99999,
+                maxWidth: 300,
+                pointerEvents: 'none',
+                whiteSpace: 'pre-line',
+              }}
+              className="bg-gray-900 text-white text-xs rounded-xl px-3.5 py-2.5 shadow-2xl leading-relaxed animate-fade-in"
+            >
+              {/* Flèche vers le haut */}
+              <div style={{
+                position: 'absolute', top: -6, left: '50%', transform: 'translateX(-50%)',
+                width: 12, height: 12, background: '#111827', rotate: '45deg', borderRadius: 2,
+              }} />
+              {tip}
+            </div>,
+            document.body
+          )}
+        </Tag>
+      );
+    }
+
+    // =========================================================
+    // COMPOSANT UTILITAIRE : NumericInput
+    // Garde la valeur brute locale pendant la frappe.
+    // Parse et propage au parent uniquement sur onBlur.
+    // Accepte virgule ET point comme séparateur décimal.
+    // =========================================================
+    function NumericInput({ value, onChange, transform, fallback, integer, className, ...props }) {
+      const [raw, setRaw] = useState(String(value ?? ''));
+      const focused = useRef(false);
+
+      // Synchronise l'affichage depuis le parent quand le champ n'est pas actif
+      useEffect(() => {
+        if (!focused.current) {
+          setRaw(String(value ?? ''));
+        }
+      }, [value]);
+
+      const commit = () => {
+        focused.current = false;
+        const cleaned = String(raw).replace(',', '.').trim();
+        const parsed  = integer ? parseInt(cleaned, 10) : parseFloat(cleaned);
+        const fb      = fallback ?? (integer ? 1 : 0);
+        let final     = isNaN(parsed) ? (typeof value === 'number' ? value : fb) : parsed;
+        if (transform) final = transform(final);
+        setRaw(String(final));
+        onChange(final);
+      };
+
+      return (
+        <input
+          {...props}
+          type="text"
+          inputMode={integer ? 'numeric' : 'decimal'}
+          value={raw}
+          onChange={e => setRaw(e.target.value)}
+          onFocus={() => { focused.current = true; }}
+          onBlur={commit}
+          onKeyDown={e => { if (e.key === 'Enter') { e.target.blur(); } }}
+          className={className}
+        />
+      );
+    }
+
+    // =========================================================
     // COMPONENT: LoadInput
     // =========================================================
     function LoadInput({ loads, setLoads }) {
@@ -886,26 +1063,40 @@
               <thead>
                 <tr className="text-[10px] font-bold uppercase tracking-wider">
                   <th className="sticky-col bg-gray-700 text-white px-3 py-1.5 text-left" style={{ minWidth: '130px' }}>
-                    Identification
+                    <HoverTip tip={TIPS.appareil} className="text-white">Identification</HoverTip>
                   </th>
                   <th colSpan={3} className="bg-blue-600 text-white px-3 py-1.5 text-center border-l border-blue-500">
                     ⚡ Charge électrique
                   </th>
-                  <th className="bg-amber-500 text-white px-3 py-1.5 text-center border-l border-amber-400 w-20"
-                      title="Ku = charge réelle / puissance nominale">Ku</th>
-                  <th className="bg-emerald-600 text-white px-3 py-1.5 text-right border-l border-emerald-500 w-24">Wh/j</th>
+                  <th className="bg-amber-500 text-white px-3 py-1.5 text-center border-l border-amber-400 w-20">
+                    <HoverTip tip={TIPS.ku} className="text-white">Ku</HoverTip>
+                  </th>
+                  <th className="bg-emerald-600 text-white px-3 py-1.5 text-right border-l border-emerald-500 w-24">
+                    <HoverTip tip={TIPS.whj} className="text-white">Wh/j</HoverTip>
+                  </th>
                   <th className="bg-gray-600 px-2 py-1.5 w-8 print:hidden"></th>
                 </tr>
                 {/* ── Ligne 2 : colonnes ── */}
                 <tr className="text-xs bg-gray-50 border-b border-gray-200">
                   <th className="sticky-col bg-gray-50 px-3 py-2 text-left font-semibold text-gray-600 border-r border-gray-200"
-                      style={{ minWidth: '130px' }}>Appareil</th>
-                  <th className="px-3 py-2 text-center text-blue-600 font-medium w-20">Type</th>
-                  <th className="px-3 py-2 text-right text-blue-600 font-medium w-20" title="Puissance nominale (W)">W</th>
-                  <th className="px-3 py-2 text-right text-blue-600 font-medium w-14" title="Nombre d'appareils">N</th>
-                  <th className="px-3 py-2 text-right text-amber-600 font-medium w-20 border-l border-amber-100"
-                      title="Facteur d'utilisation (0.10–1.00)">0–1</th>
-                  <th className="px-3 py-2 text-right text-emerald-600 font-medium w-24 border-l border-emerald-100">P×Ku×h×N</th>
+                      style={{ minWidth: '130px' }}>
+                    <HoverTip tip={TIPS.appareil}>Appareil</HoverTip>
+                  </th>
+                  <th className="px-3 py-2 text-center text-blue-600 font-medium w-20">
+                    <HoverTip tip={TIPS.type_courant}>Type</HoverTip>
+                  </th>
+                  <th className="px-3 py-2 text-right text-blue-600 font-medium w-20">
+                    <HoverTip tip={TIPS.puissance_w}>W</HoverTip>
+                  </th>
+                  <th className="px-3 py-2 text-right text-blue-600 font-medium w-14">
+                    <HoverTip tip={TIPS.quantite_n}>N</HoverTip>
+                  </th>
+                  <th className="px-3 py-2 text-right text-amber-600 font-medium w-20 border-l border-amber-100">
+                    <HoverTip tip={TIPS.ku}>0–1</HoverTip>
+                  </th>
+                  <th className="px-3 py-2 text-right text-emerald-600 font-medium w-24 border-l border-emerald-100">
+                    <HoverTip tip={TIPS.whj}>P×Ku×h×N</HoverTip>
+                  </th>
                   <th className="px-2 py-2 w-8 print:hidden"></th>
                 </tr>
               </thead>
@@ -943,26 +1134,32 @@
 
                         {/* Puissance */}
                         <td className="px-2 py-2">
-                          <input type="number" min="0" value={load.power}
-                            onChange={(e) => updateLoad(load.id, 'power', parseFloat(e.target.value) || 0)}
+                          <NumericInput min="0" value={load.power}
+                            onChange={v => updateLoad(load.id, 'power', v)}
+                            transform={v => Math.max(0, v)}
+                            fallback={0}
                             className="w-full bg-blue-50/70 border border-blue-100 rounded px-2 py-1 text-right text-sm font-semibold text-blue-900 focus:ring-1 focus:ring-blue-400"
                           />
                         </td>
 
                         {/* Qté */}
                         <td className="px-2 py-2">
-                          <input type="number" min="1" value={load.quantity}
-                            onChange={(e) => updateLoad(load.id, 'quantity', parseInt(e.target.value) || 1)}
+                          <NumericInput integer min="1" value={load.quantity}
+                            onChange={v => updateLoad(load.id, 'quantity', v)}
+                            transform={v => Math.max(1, Math.round(v))}
+                            fallback={1}
                             className="w-full bg-blue-50/70 border border-blue-100 rounded px-2 py-1 text-right text-sm text-blue-900 focus:ring-1 focus:ring-blue-400"
                           />
                         </td>
 
                         {/* Ku */}
                         <td className="px-2 py-2 border-l border-amber-50">
-                          <input type="number" step="0.05" min="0.1" max="1" value={load.ku ?? 1.0}
-                            onChange={(e) => updateLoad(load.id, 'ku', Math.min(1, Math.max(0.1, parseFloat(e.target.value) || 1.0)))}
+                          <NumericInput step="0.05" value={load.ku ?? 1.0}
+                            onChange={v => updateLoad(load.id, 'ku', v)}
+                            transform={v => Math.min(1, Math.max(0.1, v))}
+                            fallback={1.0}
                             className="w-full bg-amber-50 border border-amber-200 rounded px-2 py-1 text-right text-sm font-semibold text-amber-800 focus:ring-1 focus:ring-amber-400"
-                            title="Facteur d'utilisation"
+                            title="Facteur d'utilisation (0.1–1.0)"
                           />
                         </td>
 
@@ -1092,7 +1289,7 @@
       const handleChange = (field, value) => {
         setSettings(prev => ({
           ...prev,
-          [field]: parseFloat(value) || 0
+          [field]: typeof value === 'number' ? value : (parseFloat(value) || 0)
         }));
       };
 
@@ -1127,55 +1324,53 @@
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Irradiation (Ens)
+                    <HoverTip tip={TIPS.irradiation}>Irradiation (Ens)</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">kWh/m²/j</span>
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput
                     value={settings.irradiation}
-                    onChange={(e) => handleChange('irradiation', e.target.value)}
+                    onChange={v => handleChange('irradiation', v)}
+                    transform={v => Math.max(0.1, v)}
+                    fallback={5}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Autonomie (N)
+                    <HoverTip tip={TIPS.autonomie}>Autonomie (N)</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">Jours</span>
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput integer
                     value={settings.autonomyDays}
-                    onChange={(e) => handleChange('autonomyDays', e.target.value)}
+                    onChange={v => handleChange('autonomyDays', v)}
+                    transform={v => Math.max(1, Math.round(v))}
+                    fallback={2}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Facteur K (pertes système)
-                    <span className="block text-xs text-gray-400 font-normal">0.5 - 0.8 (défaut: 0.65)</span>
+                    <HoverTip tip={TIPS.kFactor}>Facteur K (pertes système)</HoverTip>
+                    <span className="block text-xs text-gray-400 font-normal">0.5–0.8 (défaut: 0.65)</span>
                   </label>
-                  <input
-                    type="number"
-                    step="0.05"
-                    min="0.3"
-                    max="1"
+                  <NumericInput step="0.05"
                     value={settings.kFactor}
-                    onChange={(e) => handleChange('kFactor', e.target.value)}
+                    onChange={v => handleChange('kFactor', v)}
+                    transform={v => Math.min(1, Math.max(0.3, v))}
+                    fallback={0.65}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Rendement Onduleur (η)
-                    <span className="block text-xs text-gray-400 font-normal">0.85 - 0.95 (défaut: 0.90)</span>
+                    <HoverTip tip={TIPS.inverterEff}>Rendement Onduleur (η)</HoverTip>
+                    <span className="block text-xs text-gray-400 font-normal">0.85–0.95 (défaut: 0.90)</span>
                   </label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    min="0.5"
-                    max="1"
+                  <NumericInput step="0.01"
                     value={settings.inverterEfficiency}
-                    onChange={(e) => handleChange('inverterEfficiency', e.target.value)}
+                    onChange={v => handleChange('inverterEfficiency', v)}
+                    transform={v => Math.min(1, Math.max(0.5, v))}
+                    fallback={0.90}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
@@ -1191,34 +1386,30 @@
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Ks — Simultanéité
+                    <HoverTip tip={TIPS.ks}>Ks — Simultanéité</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">0.7–1.0 (défaut: 0.80)</span>
                   </label>
-                  <input
-                    type="number"
-                    step="0.05"
-                    min="0.1"
-                    max="1"
+                  <NumericInput step="0.05"
                     value={settings.ks ?? 0.80}
-                    onChange={(e) => handleChange('ks', e.target.value)}
-                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                    onChange={v => handleChange('ks', v)}
+                    transform={v => Math.min(1, Math.max(0.1, v))}
+                    fallback={0.80}
                     title="Fraction des charges fonctionnant simultanément"
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Ke — Extension
+                    <HoverTip tip={TIPS.ke}>Ke — Extension</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">1.0–1.3 (défaut: 1.10)</span>
                   </label>
-                  <input
-                    type="number"
-                    step="0.05"
-                    min="1"
-                    max="1.5"
+                  <NumericInput step="0.05"
                     value={settings.ke ?? 1.10}
-                    onChange={(e) => handleChange('ke', e.target.value)}
-                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
+                    onChange={v => handleChange('ke', v)}
+                    transform={v => Math.min(1.5, Math.max(1.0, v))}
+                    fallback={1.10}
                     title="Réserve pour extension future de l'installation"
+                    className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
               </div>
@@ -1256,39 +1447,40 @@
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Tension Unitaire
+                    <HoverTip tip={TIPS.batVoltage}>Tension Unitaire</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">Volts (ex: 12)</span>
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput integer
                     value={settings.batteryVoltage}
-                    onChange={(e) => handleChange('batteryVoltage', e.target.value)}
+                    onChange={v => handleChange('batteryVoltage', v)}
+                    transform={v => Math.max(6, Math.round(v))}
+                    fallback={12}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Capacité Unitaire
+                    <HoverTip tip={TIPS.batCapacity}>Capacité Unitaire</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">Ah (ex: 200)</span>
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput integer
                     value={settings.batteryCapacity}
-                    onChange={(e) => handleChange('batteryCapacity', e.target.value)}
+                    onChange={v => handleChange('batteryCapacity', v)}
+                    transform={v => Math.max(1, Math.round(v))}
+                    fallback={200}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
                 <div className="col-span-2">
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Décharge Max (D)
-                    <span className="block text-xs text-gray-400 font-normal">0.5-0.8 pour Plomb, 0.9 Lithium</span>
+                    <HoverTip tip={TIPS.discharge}>Décharge Max (D)</HoverTip>
+                    <span className="block text-xs text-gray-400 font-normal">0.5–0.8 Plomb · 0.9 Lithium</span>
                   </label>
-                  <input
-                    type="number"
-                    step="0.05"
-                    max="1"
+                  <NumericInput step="0.05"
                     value={settings.dischargeLimit}
-                    onChange={(e) => handleChange('dischargeLimit', e.target.value)}
+                    onChange={v => handleChange('dischargeLimit', v)}
+                    transform={v => Math.min(1, Math.max(0.1, v))}
+                    fallback={0.80}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
@@ -1303,25 +1495,27 @@
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Puissance Crête
+                    <HoverTip tip={TIPS.panelPower}>Puissance Crête</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">Wc (ex: 300)</span>
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput integer
                     value={settings.panelPower}
-                    onChange={(e) => handleChange('panelPower', e.target.value)}
+                    onChange={v => handleChange('panelPower', v)}
+                    transform={v => Math.max(1, Math.round(v))}
+                    fallback={300}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Tension Nominale (Vmp)
+                    <HoverTip tip={TIPS.panelVoltage}>Tension Nominale (Vmp)</HoverTip>
                     <span className="block text-xs text-gray-400 font-normal">Volts (ex: 30)</span>
                   </label>
-                  <input
-                    type="number"
+                  <NumericInput
                     value={settings.panelVoltage}
-                    onChange={(e) => handleChange('panelVoltage', e.target.value)}
+                    onChange={v => handleChange('panelVoltage', v)}
+                    transform={v => Math.max(1, v)}
+                    fallback={30}
                     className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-blue-500 focus:border-blue-500 text-black print:border-none print:bg-transparent print:p-0 print:font-semibold"
                   />
                 </div>
@@ -1391,7 +1585,7 @@
             {/* Top Summary Stats */}
             <div className="grid grid-cols-2 gap-4 mb-6">
               <div className="bg-orange-50 p-4 rounded-lg print:bg-transparent print:border print:border-orange-200">
-                <span className="text-xs text-orange-600 font-bold uppercase">Consommation Journalière (Ej)</span>
+                <HoverTip tip={TIPS.ej} as="span" className="text-xs text-orange-600 font-bold uppercase">Consommation Journalière (Ej)</HoverTip>
                 <div className="text-2xl font-bold text-gray-900 mt-1">
                   {Math.round(results.totalEnergyDaily).toLocaleString()} <span className="text-sm font-normal text-gray-500">Wh/j</span>
                 </div>
@@ -1400,7 +1594,7 @@
                 </div>
               </div>
               <div className="bg-blue-50 p-4 rounded-lg print:bg-transparent print:border print:border-blue-200">
-                <span className="text-xs text-blue-600 font-bold uppercase">Puissance Crête Requise (Pch)</span>
+                <HoverTip tip={TIPS.pch} as="span" className="text-xs text-blue-600 font-bold uppercase">Puissance Crête Requise (Pch)</HoverTip>
                 <div className="text-2xl font-bold text-gray-900 mt-1">
                   {Math.round(results.peakPower).toLocaleString()} <span className="text-sm font-normal text-gray-500">Wc</span>
                 </div>
@@ -1411,15 +1605,15 @@
             {settings && results.ksKe !== undefined && (
               <div className="mb-4 text-xs bg-amber-50 border border-amber-200 rounded-lg px-4 py-2.5 grid grid-cols-3 divide-x divide-amber-200 text-center">
                 <div className="pr-2">
-                  <div className="text-amber-600 font-bold uppercase tracking-wide">Ku (par appareil)</div>
+                  <HoverTip tip={TIPS.ku} className="text-amber-600 font-bold uppercase tracking-wide block">Ku (par appareil)</HoverTip>
                   <div className="text-gray-700 mt-0.5">Utilisation réelle</div>
                 </div>
                 <div className="px-2">
-                  <div className="text-amber-600 font-bold uppercase tracking-wide">Ks = {(settings.ks ?? 0.80).toFixed(2)}</div>
+                  <HoverTip tip={TIPS.ks} className="text-amber-600 font-bold uppercase tracking-wide block">Ks = {(settings.ks ?? 0.80).toFixed(2)}</HoverTip>
                   <div className="text-gray-700 mt-0.5">Simultanéité</div>
                 </div>
                 <div className="pl-2">
-                  <div className="text-amber-600 font-bold uppercase tracking-wide">Ke = {(settings.ke ?? 1.10).toFixed(2)}</div>
+                  <HoverTip tip={TIPS.ke} className="text-amber-600 font-bold uppercase tracking-wide block">Ke = {(settings.ke ?? 1.10).toFixed(2)}</HoverTip>
                   <div className="text-gray-700 mt-0.5">Extension future</div>
                 </div>
               </div>
@@ -1461,7 +1655,7 @@
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e5e7eb" />
                         <XAxis dataKey="label" tick={{ fontSize: 8 }} interval={1} />
                         <YAxis tick={{ fontSize: 9 }} unit="W" />
-                        <Tooltip
+                        <RechartTooltip
                           formatter={(val) => [`${val} W`, 'Puissance']}
                           labelFormatter={(l) => `${l}`}
                           contentStyle={{ fontSize: 11 }}
@@ -1627,7 +1821,7 @@
                             <Cell key={`cell-${index}`} fill={entry.color} />
                           ))}
                         </Pie>
-                        <Tooltip formatter={(value) => Math.round(value) + ' Wh'} />
+                        <RechartTooltip formatter={(value) => Math.round(value) + ' Wh'} />
                       </PieChart>
                     </ResponsiveContainer>
                   </div>
@@ -1686,7 +1880,7 @@
       const [lengths, setLengths] = useState(() => ({ 'pv-reg': 10, 'reg-bat': 2, 'bat-bat': 0.5, 'bat-inv': 2, 'inv-load': 10 }));
       const [kDerating, setKDerating] = useState(1.0);
 
-      const updateLength = (id, val) => setLengths(prev => ({ ...prev, [id]: parseFloat(val) || 0 }));
+      const updateLength = (id, val) => setLengths(prev => ({ ...prev, [id]: typeof val === 'number' ? val : (parseFloat(String(val).replace(',','.')) || 0) }));
 
       if (!isOpen) return null;
 
@@ -1876,9 +2070,11 @@
                         </div>
                         <div className="bg-white/70 rounded-lg p-2.5 border border-gray-200">
                           <label className="block text-xs text-gray-500 mb-1">Longueur (L)</label>
-                          <input type="number" min="0.5" step="0.5"
+                          <NumericInput step="0.5"
                             value={seg.L}
-                            onChange={e => updateLength(seg.id, e.target.value)}
+                            onChange={v => updateLength(seg.id, v)}
+                            transform={v => Math.max(0.1, v)}
+                            fallback={1}
                             className="w-full bg-white border border-gray-300 rounded px-2 py-1 text-sm font-bold text-black focus:ring-orange-500 focus:border-orange-500"
                           />
                           <div className="text-xs text-gray-400 mt-0.5">mètres</div>
@@ -1962,14 +2158,14 @@
                     <thead className="bg-gray-800 text-white uppercase tracking-wide">
                       <tr>
                         <th className="px-3 py-2.5 text-left">Segment</th>
-                        <th className="px-3 py-2.5 text-right">I (A)</th>
-                        <th className="px-3 py-2.5 text-right">L (m)</th>
-                        <th className="px-3 py-2.5 text-right">S ΔV (mm²)</th>
-                        <th className="px-3 py-2.5 text-right">S therm. (mm²)</th>
-                        <th className="px-3 py-2.5 text-right font-bold">S phase (mm²)</th>
-                        <th className="px-3 py-2.5 text-right text-purple-300">PE (mm²)</th>
-                        <th className="px-3 py-2.5 text-right">Amp.×K (A)</th>
-                        <th className="px-3 py-2.5 text-right">ΔV (%)</th>
+                        <th className="px-3 py-2.5 text-right"><HoverTip tip={TIPS.segI} className="text-white">I (A)</HoverTip></th>
+                        <th className="px-3 py-2.5 text-right"><HoverTip tip={TIPS.segL} className="text-white">L (m)</HoverTip></th>
+                        <th className="px-3 py-2.5 text-right"><HoverTip tip={TIPS.segSDV} className="text-white">S ΔV (mm²)</HoverTip></th>
+                        <th className="px-3 py-2.5 text-right"><HoverTip tip={TIPS.segSTherm} className="text-white">S therm. (mm²)</HoverTip></th>
+                        <th className="px-3 py-2.5 text-right font-bold"><HoverTip tip={TIPS.segSPhase} className="text-white">S phase (mm²)</HoverTip></th>
+                        <th className="px-3 py-2.5 text-right text-purple-300"><HoverTip tip={TIPS.segPE} className="text-purple-300">PE (mm²)</HoverTip></th>
+                        <th className="px-3 py-2.5 text-right"><HoverTip tip={TIPS.segAmp} className="text-white">Amp.×K (A)</HoverTip></th>
+                        <th className="px-3 py-2.5 text-right"><HoverTip tip={TIPS.segDV} className="text-white">ΔV (%)</HoverTip></th>
                         <th className="px-3 py-2.5 text-center">Type</th>
                         <th className="px-3 py-2.5 text-center">✓</th>
                       </tr>
@@ -2029,22 +2225,24 @@
     // COMPONENT: StringDimensioning
     // =========================================================
     function StringDimensioning({ s, setS }) {
-      const h = (field, val) => setS(prev => ({ ...prev, [field]: parseFloat(val) || 0 }));
+      const h = (field, val) => setS(prev => ({ ...prev, [field]: typeof val === 'number' ? val : (parseFloat(String(val).replace(',','.')) || 0) }));
       const res = calculateStringConfig(s);
 
-      function InputField({ label, unit, field, step, note }) {
+      function InputField({ label, unit, field, step, note, integer: isInt, min: minVal, tip }) {
         return (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
-              {label}
+              {tip ? <HoverTip tip={tip}>{label}</HoverTip> : label}
               {unit && <span className="block text-xs text-gray-400 font-normal">{unit}</span>}
               {note && <span className="block text-xs text-blue-400 font-normal">{note}</span>}
             </label>
-            <input
-              type="number"
+            <NumericInput
               step={step || "any"}
+              integer={isInt}
               value={s[field]}
-              onChange={e => h(field, e.target.value)}
+              onChange={v => h(field, v)}
+              transform={isInt ? (v => Math.max(minVal ?? 1, Math.round(v))) : (minVal != null ? (v => Math.max(minVal, v)) : undefined)}
+              fallback={s[field]}
               className="w-full bg-gray-50 border border-gray-300 rounded-md px-3 py-2 text-sm focus:ring-orange-500 focus:border-orange-500 text-black"
             />
           </div>
@@ -2113,14 +2311,14 @@
                 Paramètres du Panneau (STC — 25 °C)
               </h2>
               <div className="grid grid-cols-2 gap-4">
-                <InputField label="Voc — Tension circuit ouvert" unit="Volts (ex: 49.90)" field="voc" step="0.01" />
-                <InputField label="Vmpp — Tension au point max" unit="Volts (ex: 41.96)" field="vmpp" step="0.01" />
-                <InputField label="Isc — Courant court-circuit" unit="Ampères (ex: 13.98)" field="isc" step="0.01" />
-                <InputField label="Impp — Courant au point max" unit="Ampères (ex: 13.11)" field="impp" step="0.01" />
-                <InputField label="β — Coeff. temp. tension" unit="%/°C (ex: -0.272)" field="beta" step="0.001" note="Valeur négative (tension ↓ quand T ↑)" />
-                <InputField label="α — Coeff. temp. courant" unit="%/°C (ex: +0.044)" field="alpha" step="0.001" note="Valeur positive (courant ↑ quand T ↑)" />
-                <InputField label="Vsys max panneau" unit="V (ex: 1500)" field="vsysMax" step="1" />
-                <InputField label="Fusible max série (Isc_max)" unit="A (ex: 25)" field="fuseMax" step="1" />
+                <InputField label="Voc — Tension circuit ouvert" unit="Volts (ex: 49.90)" field="voc" step="0.01" tip={TIPS.voc} />
+                <InputField label="Vmpp — Tension au point max" unit="Volts (ex: 41.96)" field="vmpp" step="0.01" tip={TIPS.vmpp} />
+                <InputField label="Isc — Courant court-circuit" unit="Ampères (ex: 13.98)" field="isc" step="0.01" tip={TIPS.isc} />
+                <InputField label="Impp — Courant au point max" unit="Ampères (ex: 13.11)" field="impp" step="0.01" tip={TIPS.impp} />
+                <InputField label="β — Coeff. temp. tension" unit="%/°C (ex: -0.272)" field="beta" step="0.001" note="Valeur négative (tension ↓ quand T ↑)" tip={TIPS.betaCoeff} />
+                <InputField label="α — Coeff. temp. courant" unit="%/°C (ex: +0.044)" field="alpha" step="0.001" note="Valeur positive (courant ↑ quand T ↑)" tip={TIPS.alphaCoeff} />
+                <InputField label="Vsys max panneau" unit="V (ex: 1500)" field="vsysMax" step="1" tip={TIPS.vsysMax} />
+                <InputField label="Fusible max série (Isc_max)" unit="A (ex: 25)" field="fuseMax" step="1" tip={TIPS.fuseMax} />
               </div>
             </div>
 
@@ -2131,22 +2329,22 @@
                 Paramètres de l'Onduleur
               </h2>
               <div className="grid grid-cols-2 gap-4">
-                <InputField label="Vdc max onduleur" unit="V (ex: 1100)" field="vdcMax" step="1" />
-                <InputField label="V startup (démarrage)" unit="V (ex: 200)" field="vstartup" step="1" />
-                <InputField label="Plage MPPT min" unit="V (ex: 200)" field="vmpptMin" step="1" />
-                <InputField label="Plage MPPT max" unit="V (ex: 1000)" field="vmpptMax" step="1" />
-                <InputField label="Impp max par MPPT" unit="A (ex: 30)" field="imppMaxMPPT" step="1" />
-                <InputField label="Isc max par MPPT" unit="A (ex: 40)" field="iscMaxMPPT" step="1" />
-                <InputField label="Nombre de MPPT" unit="(ex: 6)" field="nMPPT" step="1" />
-                <InputField label="Entrées par MPPT" unit="(ex: 2)" field="inputsPerMPPT" step="1" />
+                <InputField label="Vdc max onduleur" unit="V (ex: 1100)" field="vdcMax" step="1" tip={TIPS.vdcMax} />
+                <InputField label="V startup (démarrage)" unit="V (ex: 200)" field="vstartup" step="1" tip={TIPS.vstartup} />
+                <InputField label="Plage MPPT min" unit="V (ex: 200)" field="vmpptMin" step="1" tip={TIPS.vmpptMin} />
+                <InputField label="Plage MPPT max" unit="V (ex: 1000)" field="vmpptMax" step="1" tip={TIPS.vmpptMax} />
+                <InputField label="Impp max par MPPT" unit="A (ex: 30)" field="imppMaxMPPT" step="1" tip={TIPS.imppMaxMPPT} />
+                <InputField label="Isc max par MPPT" unit="A (ex: 40)" field="iscMaxMPPT" step="1" tip={TIPS.iscMaxMPPT} />
+                <InputField label="Nombre de MPPT" unit="(ex: 6)" field="nMPPT" step="1" tip={TIPS.nMPPT} />
+                <InputField label="Entrées par MPPT" unit="(ex: 2)" field="inputsPerMPPT" step="1" tip={TIPS.inputsPerMPPT} />
               </div>
               <div className="mt-4 pt-4 border-t border-gray-100">
                 <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Sortie AC de l'onduleur</p>
                 <div className="grid grid-cols-2 gap-4">
-                  <InputField label="Puissance AC nominale" unit="kW (ex: 60)" field="pacNominal" step="0.5" />
+                  <InputField label="Puissance AC nominale" unit="kW (ex: 60)" field="pacNominal" step="0.5" tip={TIPS.pacNominal} />
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Type de réseau
+                      <HoverTip tip={TIPS.phaseType}>Type de réseau</HoverTip>
                       <span className="block text-xs text-gray-400 font-normal">Monophasé / Triphasé</span>
                     </label>
                     <select
@@ -2159,7 +2357,7 @@
                     </select>
                   </div>
                   {s.phaseType === 'mono' && (
-                    <InputField label="cos φ charge AC" unit="(ex: 0.90)" field="cosPhiAC" step="0.01" />
+                    <InputField label="cos φ charge AC" unit="(ex: 0.90)" field="cosPhiAC" step="0.01" tip={TIPS.cosPhiAC} />
                   )}
                 </div>
               </div>
@@ -2173,37 +2371,39 @@
                 <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-green-100 text-green-700 border border-green-200">Étape 8</span>
               </h2>
               <div className="grid grid-cols-2 gap-4 mb-4">
-                <InputField label="T min cellule" unit="°C (ex: 15 pour CI)" field="tMinCell" step="1" note="Nuit froide / saison sèche" />
-                <InputField label="T max cellule" unit="°C (ex: 70 pour CI)" field="tMaxCell" step="1" note="Panneau en plein soleil" />
+                <InputField label="T min cellule" unit="°C (ex: 15 pour CI)" field="tMinCell" step="1" note="Nuit froide / saison sèche" tip={TIPS.tMinCell} />
+                <InputField label="T max cellule" unit="°C (ex: 70 pour CI)" field="tMaxCell" step="1" note="Panneau en plein soleil" tip={TIPS.tMaxCell} />
               </div>
               <div className="p-4 bg-orange-50 rounded-lg border border-orange-100">
                 <p className="text-xs font-bold text-orange-700 uppercase mb-3">Configuration à évaluer</p>
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      N panneaux en série (par string)
+                      <HoverTip tip={TIPS.nSeries}>N panneaux en série (par string)</HoverTip>
                       <span className={`block text-xs font-semibold mt-0.5 ${nOk ? 'text-green-600' : 'text-red-600'}`}>
                         Plage admissible : {res.nMin} – {res.nMax} {nOk ? '✓' : '✗'}
                       </span>
                     </label>
-                    <input
-                      type="number" step="1" min="1"
+                    <NumericInput integer
                       value={s.nPanelsSeries}
-                      onChange={e => h('nPanelsSeries', e.target.value)}
+                      onChange={v => h('nPanelsSeries', v)}
+                      transform={v => Math.max(1, Math.round(v))}
+                      fallback={s.nPanelsSeries}
                       className={`w-full border rounded-md px-3 py-2 text-sm font-bold text-black focus:outline-none ${nOk ? 'bg-green-50 border-green-400' : 'bg-red-50 border-red-400'}`}
                     />
                   </div>
                   <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">
-                      N strings en parallèle (par MPPT)
+                      <HoverTip tip={TIPS.nParallel}>N strings en parallèle (par MPPT)</HoverTip>
                       <span className={`block text-xs font-semibold mt-0.5 ${npOk ? 'text-green-600' : 'text-red-600'}`}>
                         Max : {s.inputsPerMPPT} entrées/MPPT {npOk ? '✓' : '✗'}
                       </span>
                     </label>
-                    <input
-                      type="number" step="1" min="1"
+                    <NumericInput integer
                       value={s.nStringsParallel}
-                      onChange={e => h('nStringsParallel', e.target.value)}
+                      onChange={v => h('nStringsParallel', v)}
+                      transform={v => Math.max(1, Math.round(v))}
+                      fallback={s.nStringsParallel}
                       className={`w-full border rounded-md px-3 py-2 text-sm font-bold text-black focus:outline-none ${npOk ? 'bg-green-50 border-green-400' : 'bg-red-50 border-red-400'}`}
                     />
                   </div>
@@ -2229,12 +2429,12 @@
                 <div className="flex items-center justify-center gap-4 py-2">
                   <div className="text-center">
                     <div className="text-3xl font-bold text-blue-600">{res.nMin}</div>
-                    <div className="text-xs text-gray-500 mt-1">N_min<br/><span className="font-mono">Vmpp(Tmax)</span></div>
+                    <div className="text-xs text-gray-500 mt-1"><HoverTip tip={TIPS.nMinRes}>N_min</HoverTip><br/><span className="font-mono">Vmpp(Tmax)</span></div>
                   </div>
                   <div className="text-gray-400 text-xl font-bold">≤ N ≤</div>
                   <div className="text-center">
                     <div className="text-3xl font-bold text-blue-600">{res.nMax}</div>
-                    <div className="text-xs text-gray-500 mt-1">N_max<br/><span className="font-mono">Voc(Tmin)</span></div>
+                    <div className="text-xs text-gray-500 mt-1"><HoverTip tip={TIPS.nMaxRes}>N_max</HoverTip><br/><span className="font-mono">Voc(Tmin)</span></div>
                   </div>
                 </div>
                 <div className="mt-3 text-xs text-gray-400 bg-gray-50 p-2 rounded font-mono space-y-0.5">
@@ -2245,19 +2445,21 @@
 
               {/* Valeurs panneau corrigées */}
               <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
-                <h3 className="font-semibold text-gray-800 mb-3 text-sm">Valeurs Panneau Corrigées en Température</h3>
+                <h3 className="font-semibold text-gray-800 mb-3 text-sm">
+                  <HoverTip tip={TIPS.vTempCorr}>Valeurs Panneau Corrigées en Température</HoverTip>
+                </h3>
                 <div className="grid grid-cols-2 gap-y-1.5 text-sm">
-                  <span className="text-gray-500">Voc(T={s.tMinCell}°C):</span>
+                  <span className="text-gray-500"><HoverTip tip="Tension Voc à T_min → tension string maximale. Contrainte critique : Voc(Tmin)×N &lt; Vdc_max onduleur.">Voc(T={s.tMinCell}°C) :</HoverTip></span>
                   <span className="font-medium text-right text-red-600">{res.vocTmin.toFixed(3)} V</span>
-                  <span className="text-gray-500">Voc(T={s.tMaxCell}°C):</span>
+                  <span className="text-gray-500">Voc(T={s.tMaxCell}°C) :</span>
                   <span className="font-medium text-right text-gray-700">{res.vocTmax.toFixed(3)} V</span>
-                  <span className="text-gray-500">Vmpp(T={s.tMinCell}°C):</span>
+                  <span className="text-gray-500">Vmpp(T={s.tMinCell}°C) :</span>
                   <span className="font-medium text-right text-gray-700">{res.vmppTmin.toFixed(3)} V</span>
-                  <span className="text-gray-500">Vmpp(T={s.tMaxCell}°C):</span>
+                  <span className="text-gray-500"><HoverTip tip="Tension Vmpp à T_max → tension string minimale en fonctionnement. Détermine Nmin et la capacité de démarrage.">Vmpp(T={s.tMaxCell}°C) :</HoverTip></span>
                   <span className="font-medium text-right text-orange-600">{res.vmppTmax.toFixed(3)} V</span>
-                  <span className="text-gray-500">Isc(T={s.tMaxCell}°C):</span>
+                  <span className="text-gray-500"><HoverTip tip="Courant de court-circuit à T_max. Légèrement supérieur au Isc STC. Utilisé pour vérifier Isc_max/MPPT.">Isc(T={s.tMaxCell}°C) :</HoverTip></span>
                   <span className="font-medium text-right text-gray-700">{res.iscTmax.toFixed(3)} A</span>
-                  <span className="text-gray-500">Impp(T={s.tMaxCell}°C):</span>
+                  <span className="text-gray-500"><HoverTip tip="Courant Impp à T_max. Légèrement supérieur à Impp STC. Vérifié contre la limite Impp_max/MPPT.">Impp(T={s.tMaxCell}°C) :</HoverTip></span>
                   <span className="font-medium text-right text-gray-700">{res.imppTmax.toFixed(3)} A</span>
                 </div>
                 <div className="mt-2 text-xs text-gray-400 bg-gray-50 p-2 rounded font-mono">
@@ -2268,7 +2470,7 @@
               {/* Tensions string pour N choisi */}
               <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
                 <h3 className="font-semibold text-gray-800 mb-3 text-sm">
-                  Tensions String — {s.nPanelsSeries} panneaux en série
+                  <HoverTip tip={TIPS.vStringRes}>Tensions String — {s.nPanelsSeries} panneaux en série</HoverTip>
                 </h3>
                 <div className="space-y-2 text-sm">
                   <div className="flex justify-between items-center p-2 bg-red-50 rounded border border-red-100">
@@ -2293,7 +2495,7 @@
               {/* Courants par MPPT */}
               <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100">
                 <h3 className="font-semibold text-gray-800 mb-3 text-sm">
-                  Courants par MPPT — {s.nStringsParallel} string(s) en parallèle
+                  <HoverTip tip={TIPS.iMpptRes}>Courants par MPPT — {s.nStringsParallel} string(s) en parallèle</HoverTip>
                 </h3>
                 <div className="grid grid-cols-2 gap-y-1.5 text-sm">
                   <span className="text-gray-500">Impp (STC):</span>
@@ -2350,7 +2552,7 @@
               {/* DC Box (Étape 9) */}
               <div id="etape-9" className="bg-white p-5 rounded-xl shadow-sm border border-yellow-200">
                 <h3 className="font-semibold text-gray-800 mb-3 text-sm flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-yellow-500" /> DC Box — Étape 9
+                  <Zap className="w-4 h-4 text-yellow-500" /> <HoverTip tip={TIPS.dcBoxRes}>DC Box — Étape 9</HoverTip>
                 </h3>
                 <div className="space-y-2 text-xs">
                   <div className={`flex justify-between items-center p-2 rounded ${res.dcFuseOk ? 'bg-green-50' : 'bg-red-50'}`}>
@@ -2381,7 +2583,7 @@
               {/* AC Box (Étape 10) */}
               <div id="etape-10" className="bg-white p-5 rounded-xl shadow-sm border border-purple-200">
                 <h3 className="font-semibold text-gray-800 mb-3 text-sm flex items-center gap-2">
-                  <Cpu className="w-4 h-4 text-purple-500" /> AC Box — Étape 10
+                  <Cpu className="w-4 h-4 text-purple-500" /> <HoverTip tip={TIPS.acBoxRes}>AC Box — Étape 10</HoverTip>
                 </h3>
                 <div className="mb-2 text-xs text-gray-500 bg-purple-50 p-2 rounded font-mono">
                   I_AC = {s.pacNominal} kW / ({s.phaseType === 'tri' ? '√3 × 400V' : `230V × ${s.cosPhiAC}`}) = {res.iAC.toFixed(1)} A
